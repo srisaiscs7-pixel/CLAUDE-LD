@@ -11,9 +11,11 @@ import os
 
 import streamlit as st
 
-from dissertation import config, jobs, pipeline
-from dissertation import sources as src
-from dissertation.storage import GitHubStorage, LocalStorage
+import ld_config as config
+import ld_jobs as jobs
+import ld_pipeline as pipeline
+import ld_sources as src
+from ld_storage import GitHubStorage, LocalStorage
 
 st.set_page_config(page_title="MDS Library Dissertation Builder", page_icon="🦷", layout="wide")
 
@@ -74,7 +76,7 @@ def model_name():
 
 def llm_factory(model):
     def make():
-        from dissertation.llm import GeminiLLM
+        from ld_llm import GeminiLLM
         return GeminiLLM(API_KEY, model)
     return make
 
@@ -95,7 +97,7 @@ with st.sidebar:
     @st.cache_data(ttl=3600, show_spinner=False)
     def models(key):
         try:
-            from dissertation.llm import GeminiLLM
+            from ld_llm import GeminiLLM
             return GeminiLLM(key, "x").list_models()
         except Exception:
             return []
@@ -112,7 +114,7 @@ with st.sidebar:
             res = src.check_connections()
             if API_KEY:
                 try:
-                    from dissertation.llm import GeminiLLM
+                    from ld_llm import GeminiLLM
                     GeminiLLM(API_KEY, model_name()).generate("Reply with OK", max_tokens=20, temperature=0)
                     res["Gemini"] = "OK"
                 except Exception as e:
