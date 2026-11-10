@@ -194,8 +194,9 @@ with tab_new:
         n_tables = st.slider("Tables", 2, 4, 3)
         n_figs = st.slider("Flowcharts", 1, 2, 1)
         n_images = st.slider("Images from the web", 0, 7, 6,
-                             help="Openly licensed pictures (Wikimedia Commons and open-access journal figures), "
-                                  "chosen by Gemini to match your chapters, each credited under the figure.")
+                             help="Relevant pictures from the web (Google Search via Gemini, Wikimedia Commons, Openverse and "
+                                  "open-access journal figures), chosen by Gemini after looking at them, with the "
+                                  "source printed under each figure.")
         st.markdown("**Headings**")
         strict = st.checkbox("Use ONLY the headings in my synopsis – no new headings", True,
                              help="The chapters and sub-headings are copied exactly from your pasted text or "

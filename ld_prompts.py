@@ -9,7 +9,9 @@ Strict rules for sources:
 - Use ONLY the numbered sources supplied in the prompt. Never mention a study, author, year, statistic or
   finding that is not in those sources.
 - Put a citation after every sentence or clause that reports a finding, using the source ID in square
-  brackets, e.g. [S12] or [S3; S7]. Never cite an ID that was not supplied. Never write ranges like [S3-S7].
+  brackets, e.g. [S12] or [S3; S7]. Always include the letter S. Never write bare numbers such as [12] or
+  [ 2 ], never copy citation numbers that appear inside an abstract or excerpt, never cite an ID that was not
+  supplied, and never write ranges like [S3-S7].
 - If you name authors in the text, use exactly the surname and year shown for that source, followed by its
   citation, e.g. "Löe et al. (1965) showed ... [S4]".
 - General textbook knowledge that needs no citation (definitions, basic anatomy) may be stated briefly, but
@@ -221,9 +223,9 @@ The candidate images are attached in the same order as this list (image 1 is the
 Chapters where an image may be placed (number, then 0-based section indexes):
 {outline}
 
-Choose the {n} best images: clearly relevant to the subject, academically appropriate, readable, not
-duplicates, and spread across different chapters where possible. Reject logos, unrelated pictures, images
-of identifiable patients' full faces, and low-quality pictures. If fewer than {n} are suitable, choose fewer.
+Rank up to {n} images, best first: clearly relevant to the subject, academically appropriate, readable,
+not duplicates, and spread across different chapters where possible. Reject logos, text-only banners,
+advertisements, unrelated pictures, images of identifiable patients' full faces, and blurry pictures.
 For each, give a short factual figure caption (max 20 words) that describes what the image shows.
 
 Return JSON: {{"picks": [{{"id": 1, "chapter": 1, "after_section": 0, "caption": ""}}]}}"""

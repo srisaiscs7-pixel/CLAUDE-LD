@@ -41,6 +41,33 @@ class GeminiLLM:
                 names.append(m.name.replace("models/", ""))
         return sorted(names, reverse=True)
 
+    def web_pages(self, query: str, limit: int = 6) -> list[tuple[str, str]]:
+        """Use Gemini's Google Search tool to find web pages about a query. Returns (url, title) pairs."""
+        from google.genai import types
+        try:
+            resp = self.client.models.generate_content(
+                model=self.model,
+                contents=f"Find web pages (medical and dental textbooks, journals, educational sites, atlases) "
+                         f"that show clear illustrations, diagrams, radiographs or clinical photographs of: {query}. "
+                         f"Briefly list the pages.",
+                config=types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())],
+                                                   temperature=0.2, max_output_tokens=2000))
+        except Exception:
+            return []
+        um = getattr(resp, "usage_metadata", None)
+        if um:
+            with self._lock:
+                self.tokens_in += um.prompt_token_count or 0
+                self.tokens_out += um.candidates_token_count or 0
+        out = []
+        for cand in resp.candidates or []:
+            gm = getattr(cand, "grounding_metadata", None)
+            for ch in (getattr(gm, "grounding_chunks", None) or []):
+                web = getattr(ch, "web", None)
+                if web and web.uri and (web.uri, web.title) not in out:
+                    out.append((web.uri, web.title or ""))
+        return out[:limit]
+
     def generate(self, prompt, *, task: str = "", system: str = "", json_mode: bool = False,
                  temperature: float = 0.6, max_tokens: int = 16000, files: list | None = None,
                  tries: int = 4):

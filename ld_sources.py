@@ -160,6 +160,13 @@ def search_europepmc(query: str, limit: int = 25, years: tuple | None = None) ->
     return out
 
 
+def strip_numeric_citations(text: str) -> str:
+    """Remove citation marks such as [2], [3-5], [12, 81], ( 4 ) copied from another paper."""
+    text = re.sub(r"\s?\[\s*\d+(?:\s*[,;–\-]\s*\d+)*\s*\]", "", text or "")
+    text = re.sub(r"\s?\[\s*[,;–\-\s]*\]", "", text)
+    return re.sub(r"\s+([.,;:])", r"\1", text)
+
+
 def epmc_fulltext_excerpt(pmcid: str, max_words: int = 1500) -> str:
     """Introduction + Discussion paragraphs from an open-access article, shortened."""
     try:
@@ -173,7 +180,14 @@ def epmc_fulltext_excerpt(pmcid: str, max_words: int = 1500) -> str:
         name = (t.text or "").lower() if t is not None and t.text else ""
         if any(k in name for k in ("intro", "background", "discussion", "review", "conclusion")):
             for p in sec.findall("p"):
-                keep.append(_clean(ET.tostring(p, encoding="unicode")))
+                for parent in p.iter():               # drop the article's own reference numbers
+                    for x in list(parent):
+                        if x.tag == "xref":
+                            tail = x.tail
+                            parent.remove(x)
+                            if tail:
+                                parent.text = (parent.text or "") + tail
+                keep.append(strip_numeric_citations(_clean(ET.tostring(p, encoding="unicode"))))
     words = " ".join(keep).split()
     return " ".join(words[:max_words])
 

@@ -18,7 +18,31 @@ from ld_docbuilder import build_document
 from ld_visuals import render_flowchart
 import ld_images as imgs
 
-CITE = re.compile(r"\s?\[(S\d+(?:\s*[;,]\s*S\d+)*)\]")
+CITE_STRICT = re.compile(r"\s?\[(S\d+(?:\s*[;,]\s*S\d+)*)\]")
+# Any citation mark the writer may produce: [S12], [ S12 ], [S3; S7], [S3-S7], (S12), [12], [ 2 ], [12, 81]
+CITE = re.compile(r"\s?(?:\[\s*((?:S\s?)?\d+(?:\s*(?:[;,–\-]|and)\s*(?:S\s?)?\d+)*)\s*\]"
+                  r"|\(\s*(S\s?\d+(?:\s*(?:[;,–\-]|and)\s*S\s?\d+)*)\s*\))")
+
+
+def cite_ids(body, allowed=None):
+    """Source IDs inside one citation mark. Bare numbers count only if 'S<number>' was among the sources
+    given to the writer for that section (otherwise they were copied from a paper and are dropped)."""
+    ids = []
+    parts = re.split(r"\s*[;,]\s*|\s+and\s+", body.strip())
+    for part in parts:
+        m = re.match(r"^(S?)\s?(\d+)(?:\s*[–\-]\s*(S?)\s?(\d+))?$", part.strip())
+        if not m:
+            continue
+        has_s = bool(m.group(1))
+        lo = int(m.group(2))
+        hi = int(m.group(4)) if m.group(4) else lo
+        if hi < lo or hi - lo > 15:
+            hi = lo
+        for n in range(lo, hi + 1):
+            sid = f"S{n}"
+            if has_s or (allowed is not None and sid in allowed):
+                ids.append(sid)
+    return ids
 STAGES = ["analyse", "plan", "library", "images", "visuals", "write", "summary", "assemble"]
 STAGE_LABEL = {
     "analyse": "Reading the synopsis", "plan": "Planning chapters", "library": "Finding references", "images": "Finding images",
@@ -531,100 +555,132 @@ def _rebalance_review(j, lib):
             x["words"] += spare // max(1, len(others))
 
 
+def _gather_images(ctx, queries, lib, seen, use_epmc):
+    cands = []
+    for qq in queries:
+        ctx.check_stop()
+        batch = imgs.commons_search(qq, 6) + imgs.openverse_search(qq, 6)
+        for url, title in ctx.llm.web_pages(qq, 5) if hasattr(ctx.llm, "web_pages") else []:
+            batch += imgs.web_page_images(url, title, 4)
+        for c in batch:
+            if c["url"] not in seen:
+                seen.add(c["url"])
+                c["query"] = qq
+                cands.append(c)
+    if use_epmc:
+        for s in [x for x in lib if x.get("pmcid")][:15]:
+            ctx.check_stop()
+            for f in imgs.epmc_figures(s["pmcid"])[:4]:
+                if f["url"] not in seen:
+                    seen.add(f["url"])
+                    f["sid"] = s["sid"]
+                    cands.append(f)
+    # mix the sources so the previews are not all from one place
+    by = defaultdict(list)
+    for c in cands:
+        by[c["source"]].append(c)
+    mixed = []
+    while any(by.values()):
+        for k in ("web", "commons", "openverse", "epmc"):
+            if by[k]:
+                mixed.append(by[k].pop(0))
+    return mixed
+
+
 def stage_images(ctx):
-    """Openly licensed images from Wikimedia Commons and open-access articles, chosen by Gemini."""
+    """Images from the web (Google Search via Gemini, Wikimedia Commons, Openverse, open-access articles),
+    chosen by Gemini after looking at them, until the requested number is reached."""
     j = ctx.job
     n = int(j.get("n_images", 0) or 0)
     out = [v for v in (ctx.st.read_json(ctx.id, "visuals.json", []) or []) if v.get("kind") != "image"]
-    if n <= 0:
-        ctx.mark("images")
-        return
     plan = j["plan"]
-    lib = ctx.st.read_json(ctx.id, "library.json", [])
     allowed = [(i, c) for i, c in enumerate(plan["chapters"], 1) if c["kind"] in ("intro", "narrative", "discussion")]
-    if not allowed:
+    if n <= 0 or not allowed:
         ctx.mark("images")
         return
-    ctx.progress("images", 0.05, "Searching Wikimedia Commons and open-access articles for images")
-    try:
-        q = ctx.llm.generate(prompts.IMAGE_QUERIES.format(n=8, title=j["details"]["title"], department=j["department"],
-                                                          outline=outline_text(plan)[:3000]),
-                             task="image_queries", json_mode=True, temperature=0.3, max_tokens=2000)
-        queries = [x for x in (q or {}).get("queries", []) if isinstance(x, str) and x.strip()][:8]
-    except Exception:
-        queries = []
-    queries = queries or [j["details"]["title"]]
-    cands, seen = [], set()
-    for qi, qq in enumerate(queries):
-        ctx.check_stop()
-        for c in imgs.commons_search(qq, 6):
-            if c["url"] not in seen:
-                seen.add(c["url"])
-                cands.append(c)
-    by_pmc = {s["pmcid"]: s for s in lib if s.get("pmcid")}
-    for k, (pmcid, s) in enumerate(list(by_pmc.items())[:15]):
-        ctx.check_stop()
-        for f in imgs.epmc_figures(pmcid)[:4]:
-            f["sid"] = s["sid"]
-            cands.append(f)
-    ctx.progress("images", 0.4, f"{len(cands)} candidate images found; downloading previews")
-    # download small previews so Gemini can look at the pictures themselves
-    pool = []
-    for c in cands:
-        if len(pool) >= 30:
-            break
-        ctx.check_stop()
-        small = imgs.download(c["small"], 400)
-        if small:
-            c["_preview"] = small
-            pool.append(c)
-    if not pool:
-        ctx.log("No suitable openly licensed images were found; continuing without images.")
-        ctx.mark("images")
-        return
-    lines = []
-    for k, c in enumerate(pool, 1):
-        where = "Wikimedia Commons" if c["source"] == "commons" else "open-access article figure"
-        lines.append(f"{k}. [{where}] {c['title']}: {c['desc'][:300]}")
-    outl = []
-    for i, c in allowed:
-        outl.append(f"{i}. {c['title']} (sections: " + "; ".join(f"{k}={x['title']}" for k, x in enumerate(c['sections'])) + ")")
-    picks = ctx.llm.generate(prompts.IMAGE_PICK.format(title=j["details"]["title"], candidates="\n".join(lines),
-                                                       outline="\n".join(outl), n=n),
-                             task="image_pick", json_mode=True, temperature=0.2, max_tokens=4000,
-                             files=[(imgs.thumbnail(c["_preview"]), "image/jpeg") for c in pool]) or {}
+    lib = ctx.st.read_json(ctx.id, "library.json", [])
     ok_ch = {i: c for i, c in allowed}
-    chosen = []
-    for p in picks.get("picks", []):
-        try:
-            k, chn, aft = int(p.get("id")), int(p.get("chapter")), int(p.get("after_section", 0) or 0)
-        except (TypeError, ValueError):
-            continue
-        if not (1 <= k <= len(pool)) or any(x[0] == k for x in chosen):
-            continue
-        if chn not in ok_ch:  # move to the nearest chapter that can hold figures
-            chn = min(ok_ch, key=lambda x: abs(x - chn))
-        aft = max(0, min(aft, len(ok_ch[chn]["sections"]) - 1))
-        chosen.append((k, chn, aft, (p.get("caption") or pool[k - 1]["title"]).strip().rstrip(".")))
+    outl = "\n".join(f"{i}. {c['title']} (sections: " + "; ".join(f"{k}={x['title']}" for k, x in enumerate(c['sections'])) + ")"
+                     for i, c in allowed)
+    seen, tried, used_q, chosen = set(), set(), [], []
+    for rnd in range(3):
         if len(chosen) >= n:
             break
-    count = 0
-    for k, chn, aft, cap in chosen:
         ctx.check_stop()
-        c = pool[k - 1]
-        full = imgs.download(c["url"], 1600)
-        if not full:
+        ctx.progress("images", 0.05 + 0.3 * rnd, f"Searching the web for images (round {rnd + 1})")
+        try:
+            q = ctx.llm.generate(prompts.IMAGE_QUERIES.format(
+                n=8, title=j["details"]["title"], department=j["department"], outline=outline_text(plan)[:3000])
+                + (f"\nDo not repeat these searches: {'; '.join(used_q)}. Cover the chapters that have no image yet."
+                   if used_q else ""),
+                task="image_queries", json_mode=True, temperature=0.4 + 0.2 * rnd, max_tokens=2000)
+            queries = [x for x in (q or {}).get("queries", []) if isinstance(x, str) and x.strip()][:8]
+        except Exception:
+            queries = []
+        queries = [x for x in queries if x not in used_q] or [f"{j['details']['title']} {rnd + 1}"]
+        used_q += queries
+        cands = _gather_images(ctx, queries, lib, seen, use_epmc=(rnd == 0))
+        pool = []
+        for c in cands:
+            if len(pool) >= 40:
+                break
+            ctx.check_stop()
+            small = imgs.download(c["small"], 400)
+            if small:
+                c["_preview"] = small
+                pool.append(c)
+        ctx.log(f"Round {rnd + 1}: {len(cands)} candidate images, {len(pool)} previews")
+        if not pool:
             continue
-        count += 1
-        fname = f"image_{count}.jpg"
-        ctx.st.write_bytes(ctx.id, fname, full)
-        out.append({"kind": "image", "chapter": f"c{chn}", "plan_title": cap, "title": cap,
-                    "after_section": aft, "file": fname, "source": c["source"], "licence": c["licence"],
-                    "artist": c.get("artist", ""), "page": c.get("page", ""), "sid": c.get("sid", ""),
-                    "orig_title": c["title"]})
-        ctx.progress("images", 0.5 + 0.5 * count / max(1, len(chosen)), f"Image {count}: {cap[:80]}")
+        need = n - len(chosen)
+        lines = []
+        for k, c in enumerate(pool, 1):
+            where = {"commons": "Wikimedia Commons", "openverse": f"Openverse/{c.get('site', '')}",
+                     "epmc": "open-access journal figure", "web": c.get("site", "web page")}[c["source"]]
+            lines.append(f"{k}. [{where}] {c['title'][:120]}: {c['desc'][:250]}")
+        have = "; ".join(f"chapter {x['chn']}: {x['cap']}" for x in chosen) or "none yet"
+        try:
+            picks = ctx.llm.generate(prompts.IMAGE_PICK.format(
+                title=j["details"]["title"], candidates="\n".join(lines), outline=outl, n=need + 4)
+                + f"\nImages already chosen (do not duplicate): {have}. List your picks best first.",
+                task="image_pick", json_mode=True, temperature=0.2, max_tokens=4000,
+                files=[(imgs.thumbnail(c["_preview"]), "image/jpeg") for c in pool]) or {}
+        except Exception as e:
+            ctx.log(f"Image choice failed: {str(e)[:150]}")
+            continue
+        for p in picks.get("picks", []):
+            if len(chosen) >= n:
+                break
+            try:
+                k, chn, aft = int(p.get("id")), int(p.get("chapter")), int(p.get("after_section", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if not (1 <= k <= len(pool)) or pool[k - 1]["url"] in tried:
+                continue
+            c = pool[k - 1]
+            tried.add(c["url"])
+            if chn not in ok_ch:
+                chn = min(ok_ch, key=lambda x: abs(x - chn))
+            aft = max(0, min(aft, len(ok_ch[chn]["sections"]) - 1))
+            full = imgs.download(c["url"], 1600)
+            if not full:
+                continue
+            cap = (p.get("caption") or c["title"]).strip().rstrip(".")
+            chosen.append({"c": c, "chn": chn, "aft": aft, "cap": cap, "data": full})
+            ctx.progress("images", min(0.95, 0.35 + 0.6 * len(chosen) / n), f"Image {len(chosen)}/{n}: {cap[:80]}")
+    for idx, x in enumerate(chosen, 1):
+        c = x["c"]
+        fname = f"image_{idx}.jpg"
+        ctx.st.write_bytes(ctx.id, fname, x["data"])
+        out.append({"kind": "image", "chapter": f"c{x['chn']}", "plan_title": x["cap"], "title": x["cap"],
+                    "after_section": x["aft"], "file": fname, "source": c["source"], "licence": c.get("licence", ""),
+                    "artist": c.get("artist", ""), "site": c.get("site", ""), "page": c.get("page", ""),
+                    "page_title": c.get("page_title", ""), "sid": c.get("sid", ""), "orig_title": c["title"]})
     ctx.st.write_json(ctx.id, "visuals.json", out, force=True)
-    ctx.log(f"{count} openly licensed images added")
+    if len(chosen) < n:
+        ctx.log(f"Only {len(chosen)} of {n} images could be found and downloaded after 3 search rounds.")
+    else:
+        ctx.log(f"{len(chosen)} images added")
     ctx.mark("images")
 
 
@@ -694,7 +750,7 @@ def _section_tasks(j):
     return tasks
 
 
-def _write_section(ctx, t, lib, visuals, usage):
+def _write_section(ctx, t, lib, visuals, usage, srcmap):
     j = ctx.job
     c = t["chapter"]
     sec = c["sections"][t["index"]]
@@ -703,6 +759,7 @@ def _write_section(ctx, t, lib, visuals, usage):
                        18 if t["words"] > 900 else 12, boost_ids=ch_ids, usage=usage)
     for s in rel:
         usage[s["sid"]] = usage.get(s["sid"], 0) + 1
+    srcmap[t["key"]] = [s["sid"] for s in rel]
     notes = []
     for v in visuals:
         if v["chapter"] == c["key"] and v["after_section"] == t["index"]:
@@ -779,18 +836,19 @@ def stage_write(ctx):
     visuals = ctx.st.read_json(ctx.id, "visuals.json", [])
     texts = ctx.st.read_json(ctx.id, "texts.json", {}) or {}
     tasks = [t for t in _section_tasks(j) if t["key"] not in texts]
+    srcmap = ctx.st.read_json(ctx.id, "section_sources.json", {}) or {}
     total = len(_section_tasks(j))
     usage = Counter()
     for k, v in texts.items():
         if isinstance(v, str):
             for m in CITE.finditer(v):
-                for sid in re.findall(r"S\d+", m.group(1)):
+                for sid in re.findall(r"S\d+", m.group(1) or m.group(2) or ""):
                     usage[sid] += 0.5
 
     def run(t):
         ctx.check_stop()
         if t["kind"] == "section":
-            return _write_section(ctx, t, lib, visuals, usage)
+            return _write_section(ctx, t, lib, visuals, usage, srcmap)
         if t["kind"] == "review":
             return _write_review(ctx, t, lib)
         d = j["details"]
@@ -807,6 +865,7 @@ def stage_write(ctx):
             t = futs[f]
             try:
                 texts[t["key"]] = f.result()
+                ctx.st.write_json(ctx.id, "section_sources.json", srcmap)
                 ctx.st.write_json(ctx.id, "texts.json", texts)
                 name = t["chapter"]["title"] + (f" › {t['chapter']['sections'][t['index']]['title']}" if t["kind"] == "section" else "")
                 ctx.progress("write", len(texts) / max(1, total), f"Written: {name}")
@@ -816,6 +875,7 @@ def stage_write(ctx):
                 errors.append(f"{t['key']}: {e}")
                 ctx.log(f"Problem writing {t['key']}: {str(e)[:200]}")
     ctx.st.write_json(ctx.id, "texts.json", texts, force=True)
+    ctx.st.write_json(ctx.id, "section_sources.json", srcmap, force=True)
     if errors:
         raise RuntimeError(f"{len(errors)} parts failed to write; press Resume to retry them. First error: {errors[0][:300]}")
     ctx.mark("write")
@@ -879,6 +939,7 @@ def stage_assemble(ctx):
     visuals = ctx.st.read_json(ctx.id, "visuals.json", [])
     texts = ctx.st.read_json(ctx.id, "texts.json", {})
     entries = ctx.st.read_json(ctx.id, "review_entries.json", {}) or {}
+    sec_src = ctx.st.read_json(ctx.id, "section_sources.json", {}) or {}
     numbering = {}
     dropped = Counter()
     qa_names = []
@@ -888,9 +949,9 @@ def stage_assemble(ctx):
             numbering[sid] = len(numbering) + 1
         return numbering[sid]
 
-    def convert(text):
+    def convert(text, allowed=None):
         def rep(m):
-            ids = [x for x in re.findall(r"S\d+", m.group(1))]
+            ids = cite_ids(m.group(1) or m.group(2), allowed)
             good = [x for x in ids if x in lib]
             for x in ids:
                 if x not in lib:
@@ -948,7 +1009,7 @@ def stage_assemble(ctx):
                 if len(c["sections"]) > 1 or sec["title"].lower() != c["title"].lower():
                     lvl3 = fixed and sec.get("level") == 3
                     blocks.append({"type": "h3" if lvl3 else "h2", "text": sec["title"] if fixed else sec["title"].upper()})
-                blocks.append({"type": "text", "text": convert(t)})
+                blocks.append({"type": "text", "text": convert(t, set(sec_src.get(f"{c['key']}:{i}", [])) or None)})
                 w += words(t)
                 for v in sorted([v for v in visuals if v["chapter"] == c["key"] and v["after_section"] == i],
                                 key=lambda v: (v["kind"] != "table", v["number"])):
@@ -967,6 +1028,11 @@ def stage_assemble(ctx):
                         if v["source"] == "epmc" and v.get("sid") in lib:
                             credit = (f"Source: reproduced from {src.Source.from_dict(lib[v['sid']]).short_cite()}"
                                       f"⟦{num(v['sid'])}⟧, {v['licence']}.")
+                        elif v["source"] == "web":
+                            credit = f"Source: {v.get('site') or 'web'} – {v.get('page', '')}"
+                        elif v["source"] == "openverse":
+                            credit = (f"Source: {v.get('artist') or 'Unknown author'}, via {v.get('site') or 'Openverse'}, "
+                                      f"{v['licence']}.")
                         else:
                             credit = (f"Source: {v.get('artist') or 'Unknown author'}, via Wikimedia Commons, "
                                       f"{v['licence']}.")

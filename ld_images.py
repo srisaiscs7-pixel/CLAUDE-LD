@@ -1,9 +1,7 @@
 """Find openly licensed images for the dissertation.
 
-Two sources, both with a licence that allows reuse with attribution:
-  * Wikimedia Commons (CC BY, CC BY-SA, CC0 or public domain only)
-  * figures from open-access articles in Europe PMC whose licence is Creative Commons
-Each image keeps its attribution, which is printed under the figure.
+Sources: Wikimedia Commons, Openverse, figures from open-access articles in Europe PMC, and pictures on
+web pages found with Gemini's Google Search. Every image keeps a source line printed under the figure.
 """
 from __future__ import annotations
 
@@ -86,6 +84,75 @@ def epmc_figures(pmcid: str) -> list[dict]:
         out.append({"source": "epmc", "title": (label.text if label is not None and label.text else "Figure"),
                     "desc": caption, "licence": lic, "url": url, "small": url, "pmcid": pmcid})
     return out
+
+
+def openverse_search(query: str, limit: int = 8) -> list[dict]:
+    """Openverse: openly licensed images from Flickr, museums and other collections."""
+    try:
+        r = requests.get("https://api.openverse.org/v1/images/", headers=UA, timeout=30,
+                         params={"q": query, "page_size": limit, "mature": "false"})
+        data = r.json() if r.status_code == 200 else {}
+    except Exception:
+        return []
+    out = []
+    for x in data.get("results", []):
+        if not x.get("url"):
+            continue
+        lic = f"CC {str(x.get('license', '')).upper()} {x.get('license_version') or ''}".strip()
+        if str(x.get("license", "")).lower() in ("pdm", "cc0"):
+            lic = "Public domain" if x.get("license") == "pdm" else "CC0"
+        out.append({"source": "openverse", "title": x.get("title") or query, "desc": x.get("title") or query,
+                    "artist": x.get("creator") or "Unknown author", "licence": lic,
+                    "site": (x.get("source") or x.get("provider") or "").replace("_", " ").title(),
+                    "url": x["url"], "small": x.get("thumbnail") or x["url"],
+                    "page": x.get("foreign_landing_url") or ""})
+    return out
+
+
+_BAD = re.compile(r"logo|icon|sprite|avatar|banner|badge|button|advert|/ads?/|pixel|spacer|emoji|favicon|"
+                  r"social|share|facebook|twitter|linkedin|whatsapp|cookie|placeholder|loading", re.I)
+
+
+def web_page_images(page_url: str, title_hint: str = "", per_page: int = 5) -> list[dict]:
+    """Pictures on a web page (og:image and large <img> tags with alt text or figure captions)."""
+    from urllib.parse import urljoin, urlparse
+    try:
+        r = requests.get(page_url, headers={**UA, "Accept": "text/html"}, timeout=25, allow_redirects=True)
+        if r.status_code != 200 or "html" not in r.headers.get("content-type", ""):
+            return []
+        html = r.text[:1_500_000]
+        final = r.url
+    except Exception:
+        return []
+    site = urlparse(final).netloc.replace("www.", "")
+    tmeta = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+    page_title = _clean(tmeta.group(1), 150) if tmeta else title_hint
+    found, seen = [], set()
+
+    def add(src, alt):
+        if not src or src.startswith("data:"):
+            return
+        u = urljoin(final, src.strip())
+        if u in seen or _BAD.search(u) or not re.search(r"\.(jpe?g|png|webp|gif)(\?|$)", u, re.I):
+            return
+        seen.add(u)
+        found.append({"source": "web", "title": alt or page_title, "desc": _clean(alt or page_title, 300),
+                      "site": site, "page": final, "page_title": page_title, "licence": "",
+                      "artist": "", "url": u, "small": u})
+    for m in re.finditer(r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]*>', html, re.I):
+        c = re.search(r'content=["\']([^"\']+)', m.group(0))
+        add(c.group(1) if c else "", page_title)
+    for m in re.finditer(r"<img\b[^>]*>", html, re.I):
+        tag = m.group(0)
+        src = re.search(r'(?:data-src|data-original|src)=["\']([^"\']+)', tag)
+        alt = re.search(r'alt=["\']([^"\']*)', tag)
+        w = re.search(r'width=["\']?(\d+)', tag)
+        if w and int(w.group(1)) < 200:
+            continue
+        add(src.group(1) if src else "", _clean(alt.group(1), 200) if alt else "")
+        if len(found) >= per_page + 3:
+            break
+    return [f for f in found if len(f["desc"]) > 3][:per_page]
 
 
 def download(url: str, max_px: int = 1600) -> bytes | None:
