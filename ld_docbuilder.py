@@ -482,6 +482,8 @@ def build_document(model: dict) -> bytes:
             t = blk["type"]
             if t == "h2":
                 b.heading(blk["text"], 2)
+            elif t == "h3":
+                b.heading(blk["text"], 3)
             elif t == "text":
                 b.body_markup(blk["text"])
             elif t == "aims":

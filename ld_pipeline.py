@@ -191,7 +191,7 @@ def guess_kind(title):
     t = title.lower()
     if "introduction" in t:
         return "intro"
-    if "aim" in t or "objective" in t:
+    if re.search(r"\baims?\b|\bobjectives?\b", t):
         return "aims"
     if "review of literature" in t or "literature review" in t or "review of the literature" in t:
         return "review"
@@ -202,9 +202,44 @@ def guess_kind(title):
     return "narrative"
 
 
+_NUMBERED = re.compile(r"^\s*(\d+(?:\.\d+)*)\.?\s+(\S.*)$")
+_BULLET = re.compile(r"^\s*[\-–•*▪◦]\s+(\S.*)$")
+
+
+def parse_numbered(text):
+    """Read a numbered heading list exactly as typed: '3.' = chapter, '3.1' = section, '- x' = sub-section.
+    Returns None if the text is not a numbered list."""
+    lines = [l.rstrip() for l in text.splitlines() if l.strip()]
+    numbered = [l for l in lines if _NUMBERED.match(l) and len(l.split()) <= 25]
+    if len(numbered) < 3:
+        return None
+    chapters = []
+    for l in lines:
+        m = _NUMBERED.match(l)
+        b = _BULLET.match(l)
+        if m and len(l.split()) <= 25:
+            num, title = m.group(1), m.group(2).strip().rstrip(":").strip()
+            if _SKIP.match(_norm(title)):
+                chapters.append(None)          # stop attaching bullets to the previous heading
+                continue
+            shown = l.strip()
+            if num.count(".") == 0:
+                chapters.append({"title": shown, "plain": title, "sections": []})
+            elif chapters and chapters[-1]:
+                chapters[-1]["sections"].append({"title": shown, "brief": title, "level": 2})
+        elif b and chapters and chapters[-1] and len(l.split()) <= 25:
+            title = b.group(1).strip().rstrip(":").strip()
+            chapters[-1]["sections"].append({"title": title, "brief": title, "level": 3})
+        # any other line (title line, notes) is ignored
+    return [c for c in chapters if c]
+
+
 def extract_headings(llm, text):
-    """Headings copied from the user's text. Anything the model returns that is not in the text is dropped,
-    so no invented heading can get through."""
+    """Headings copied from the user's text. A numbered list is read directly (no AI involved). Otherwise
+    Gemini lists the headings and anything it returns that is not in the text is dropped."""
+    direct = parse_numbered(text)
+    if direct:
+        return direct
     data = llm.generate(prompts.HEADINGS.format(text=" \n".join(text.splitlines())[:120000]),
                         task="headings", json_mode=True, temperature=0, max_tokens=8000)
     src_norm = " " + _norm(text) + " "
@@ -221,7 +256,7 @@ def extract_headings(llm, text):
             continue
         if " " + n + " " not in src_norm:      # not in the user's text: drop it
             continue
-        lvl = 2 if str(h.get("level", 1)) == "2" else 1
+        lvl = 1 if str(h.get("level", 1)) == "1" else 2
         key = (lvl, n)
         if key in seen:
             continue
@@ -232,9 +267,9 @@ def extract_headings(llm, text):
     chapters = []
     for h in out:
         if h["level"] == 1 or not chapters:
-            chapters.append({"title": h["text"], "sections": []})
+            chapters.append({"title": h["text"], "plain": h["text"], "sections": []})
         else:
-            chapters[-1]["sections"].append({"title": h["text"], "brief": h["text"]})
+            chapters[-1]["sections"].append({"title": h["text"], "brief": h["text"], "level": 2})
     return chapters
 
 
@@ -261,11 +296,12 @@ def stage_plan_fixed(ctx, fixed):
     chapters = []
     for i, c in enumerate(fixed, 1):
         extra = by_num.get(i, {})
-        kind = guess_kind(c["title"])
+        kind = guess_kind(c.get("plain") or c["title"])
         if kind in ("review", "summary", "aims") and c["sections"]:
             kind = "narrative"          # the user gave sub-headings: write under each of them
         briefs = extra.get("section_briefs") or []
-        secs = [{"title": sct["title"], "brief": (briefs[k] if k < len(briefs) and briefs[k] else sct["title"])}
+        secs = [{"title": sct["title"], "level": sct.get("level", 2),
+                 "brief": (briefs[k] if k < len(briefs) and briefs[k] else sct.get("brief") or sct["title"])}
                 for k, sct in enumerate(c["sections"])]
         if not secs:
             secs = [{"title": c["title"], "brief": extra.get("brief") or c["title"]}]
@@ -274,7 +310,7 @@ def stage_plan_fixed(ctx, fixed):
         except (TypeError, ValueError):
             w = default_w[kind]
         chapters.append({"key": f"c{i}", "title": c["title"], "kind": kind, "weight": w, "sections": secs,
-                         "queries": [q for q in (extra.get("queries") or []) if q.strip()] or [f"({c['title']}) AND ({d['title']})"],
+                         "queries": [q for q in (extra.get("queries") or []) if q.strip()] or [f"({c.get('plain') or c['title']}) AND ({d['title']})"],
                          "fixed": True})
 
     def place(items, limit):
@@ -809,7 +845,8 @@ def stage_assemble(ctx):
                 if fixed:
                     t = _strip_headings(t)
                 if len(c["sections"]) > 1 or sec["title"].lower() != c["title"].lower():
-                    blocks.append({"type": "h2", "text": sec["title"] if fixed else sec["title"].upper()})
+                    lvl3 = fixed and sec.get("level") == 3
+                    blocks.append({"type": "h3" if lvl3 else "h2", "text": sec["title"] if fixed else sec["title"].upper()})
                 blocks.append({"type": "text", "text": convert(t)})
                 w += words(t)
                 for v in sorted([v for v in visuals if v["chapter"] == c["key"] and v["after_section"] == i],

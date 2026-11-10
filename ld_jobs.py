@@ -78,7 +78,7 @@ def outline_to_text(plan) -> str:
     for c in plan["chapters"]:
         lines.append(f"# {c['title']} [{c['kind']}] ({c.get('weight', 5)}%)")
         for s in c.get("sections", []):
-            lines.append(f"- {s['title']} :: {s.get('brief', '')}")
+            lines.append(f"{'--' if s.get('level') == 3 else '-'} {s['title']} :: {s.get('brief', '')}")
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -98,10 +98,11 @@ def text_to_outline(text: str, plan: dict) -> dict:
             prev = old.get(title.lower(), {})
             chapters.append({"title": title, "kind": kind, "weight": weight, "sections": [],
                              "queries": prev.get("queries") or [title], "_old": prev.get("key")})
-        elif line.lstrip().startswith("- ") and chapters:
-            body = line.lstrip()[2:]
+        elif line.lstrip().startswith(("- ", "-- ")) and chapters:
+            lvl = 3 if line.lstrip().startswith("-- ") else 2
+            body = line.lstrip()[lvl:]
             t, _, b = body.partition("::")
-            chapters[-1]["sections"].append({"title": t.strip(), "brief": (b or t).strip()})
+            chapters[-1]["sections"].append({"title": t.strip(), "brief": (b or t).strip(), "level": lvl})
     if not chapters:
         raise ValueError("No chapters found. Each chapter line must start with '# '.")
     remap = {}

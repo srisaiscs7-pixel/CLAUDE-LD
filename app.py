@@ -270,7 +270,8 @@ def job_view(jid):
     if job["status"] == "awaiting_approval" and not running:
         st.markdown("#### Check the chapter plan")
         st.caption("Edit freely: lines starting with `# ` are chapters as `# Title [kind] (weight%)`; "
-                   "lines starting with `- ` are sections as `- Section :: what it should cover`. "
+                   "lines starting with `- ` are sections as `- Section :: what it should cover` "
+                   "(`-- ` for a sub-section). "
                    "Kinds: intro, aims, narrative, review, discussion, summary.")
         txt = st.text_area("Chapter plan", jobs.outline_to_text(job["plan"]), height=420, key=f"ol{jid}")
         bud = job.get("budget", {})
