@@ -191,12 +191,18 @@ with tab_new:
                                             index=0 if p["page_number_pos"] == "center" else 1, horizontal=True)
         n_tables = st.slider("Tables", 2, 4, 3)
         n_figs = st.slider("Flowcharts", 1, 2, 1)
+        st.markdown("**Headings**")
+        strict = st.checkbox("Use ONLY the headings in my synopsis – no new headings", True,
+                             help="The chapters and sub-headings are copied exactly from your pasted text or "
+                                  "file, in the same order. Nothing is added or renamed. The writer adds no "
+                                  "sub-headings of its own.")
         st.markdown("**What to include**")
         front_matter = st.checkbox("Front pages (title page, declaration, certificates, contents lists)", False)
         include_aims = st.checkbox("Aims and Objectives chapter", False)
         include_review = st.checkbox("Review of Literature chapter", True,
                                      help="Ignored if your file lists its own headings.")
-        st.caption("If your file or pasted text has a contents list / headings, the chapters follow it exactly.")
+        if strict:
+            st.caption("Aims and Review of Literature appear only if they are among your headings.")
         review_outline = st.checkbox("Let me check the chapter plan before writing", True)
     wpp = config.words_per_page(p["line_spacing"], p["size"])
     st.caption(f"About {pages * wpp:,} words and roughly {config.reference_target(pages)} references.")
@@ -213,13 +219,16 @@ with tab_new:
             "academic_year": d2.text_input("Academic year", placeholder="2024–2027"),
             "place": d2.text_input("Place"),
         }
-    if st.button("🚀 Generate dissertation", type="primary", disabled=not (topic.strip() or syn or syn_text.strip())):
+    if strict and not (syn or syn_text.strip()):
+        st.warning("Paste or upload your synopsis with its headings – the chapters are taken from it.")
+    if st.button("🚀 Generate dissertation", type="primary", disabled=not (syn or syn_text.strip()) if strict else not (topic.strip() or syn or syn_text.strip())):
         jid = jobs.create_job(storage, topic=topic, department=dept, pages=pages, settings=p,
                               synopsis_name=syn.name if syn else ("pasted_synopsis.txt" if syn_text.strip() else None),
                               synopsis_bytes=syn.getvalue() if syn else (syn_text.encode("utf-8") if syn_text.strip() else None),
                               n_tables=n_tables, n_figures=n_figs, include_review=include_review,
                               review_outline=review_outline, details=det,
-                              front_matter=front_matter, include_aims=include_aims)
+                              front_matter=front_matter, include_aims=include_aims,
+                              strict_headings=strict and bool(syn or syn_text.strip()))
         start(jid)
         st.session_state.open_job = jid
         st.success("Started. Follow it in **My dissertations** – you can close this page and come back later "

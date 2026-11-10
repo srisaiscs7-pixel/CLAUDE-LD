@@ -89,7 +89,7 @@ Length: about {words} words (stay within 10% of this). {continuation}
 
 Formatting:
 - Plain paragraphs separated by one blank line.
-- You may use up to three sub-headings, each on its own line starting with "### ".
+- {subheading_rule}
 - A short bulleted list is allowed only where items are genuinely parallel (lines starting with "- ").
 - Do not write the section title itself. Do not add a references list.
 - Bold a term with **double asterisks** only when it is defined.
@@ -129,9 +129,7 @@ Return JSON: {{"aim": "", "objectives": [""]}}"""
 
 SUMMARY = """Write the "Summary and Conclusion" chapter (about {words} words) of the MDS library dissertation
 "{title}". Base it ONLY on the chapter digests below; do not add new facts or citations.
-Structure: 2-4 paragraphs summarising the dissertation, then a line "### Conclusion" followed by one or two
-paragraphs of conclusions, then "### Recommendations" with 3-6 short bullet points ("- ") for clinical
-practice and future research.
+Structure: {summary_structure}
 
 Chapter digests:
 {digests}
@@ -165,4 +163,47 @@ Return JSON: {{"title": "", "nodes": [{{"id": "n1", "text": "", "kind": "start"}
 
 Sources:
 {sources}
+"""
+
+
+HEADINGS = """Below is text pasted or uploaded by the user. List every heading and sub-heading in it, copied
+EXACTLY as written (same words, same spelling, same capitalisation). Do not add, rename, merge, shorten, split
+or invent headings. Keep their order. Leave out the numbering prefix (such as "1.", "2.1", "I.", "a)") but keep
+the words. Leave out "References", "Bibliography" and "Annexure"/"Appendix" headings. Ignore ordinary
+sentences: a heading is a short title line.
+level 1 = main heading (chapter); level 2 = sub-heading under the previous main heading.
+If the text has no headings at all, return an empty list.
+
+Return JSON: {{"headings": [{{"text": "", "level": 1}}]}}
+
+Text:
+<<<
+{text}
+>>>
+"""
+
+PLAN_FIXED = """These are the user's chapter and section headings for an MDS library dissertation (a dissertation
+based entirely on published literature) titled "{title}" (Department of {department}). The headings are FIXED:
+you must not change, add or remove any.
+
+{outline}
+
+Target length of the main text: about {pages} pages.
+
+For each chapter (by its number) give:
+- "weight": its relative share of the total length (introduction about 6, aims 1, conclusion/summary 3,
+  discussion about 12, review of literature about 20, other topic chapters 8-15),
+- "brief": one sentence on what the chapter should cover, consistent with its heading,
+- "section_briefs": one short brief per listed section, in the same order (an empty list if it has none),
+- "queries": 3-5 literature search queries in Europe PMC / PubMed syntax for that chapter, e.g.
+  (gingival depigmentation) AND (laser OR scalpel); broad enough to return many papers (none for aims).
+Also suggest up to {n_landmarks} classic papers you are confident exist (first author surname, year, title), and
+{n_tables} tables and {n_figs} flowcharts, each placed in a chapter (by number) after a section index (0-based;
+use 0 if the chapter has no sections).
+
+Return JSON:
+{{"chapters": [{{"number": 1, "weight": 0, "brief": "", "section_briefs": [""], "queries": [""]}}],
+  "landmarks": [{{"first_author": "", "year": "", "title": ""}}],
+  "tables": [{{"chapter": 1, "after_section": 0, "title": "", "purpose": ""}}],
+  "flowcharts": [{{"chapter": 1, "after_section": 0, "title": "", "purpose": ""}}]}}
 """

@@ -178,6 +178,122 @@ def stage_analyse(ctx):
     ctx.mark("analyse")
 
 
+# ---------------------------------------------------------------- fixed headings from the user's text
+_SKIP = re.compile(r"^(references?|bibliography|annexures?|appendix|appendices|acknowledge?ments?)$", re.I)
+_NUM = re.compile(r"^\s*(?:(?:chapter|section)\s+)?(?:\d+(?:\.\d+)*\.?|[ivxlc]+\.|[a-z]\)|\([a-z0-9]+\)|[\-–•*])\s+", re.I)
+
+
+def _norm(t):
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", (t or "").lower())).strip()
+
+
+def guess_kind(title):
+    t = title.lower()
+    if "introduction" in t:
+        return "intro"
+    if "aim" in t or "objective" in t:
+        return "aims"
+    if "review of literature" in t or "literature review" in t or "review of the literature" in t:
+        return "review"
+    if "discussion" in t:
+        return "discussion"
+    if "summary" in t or "conclusion" in t:
+        return "summary"
+    return "narrative"
+
+
+def extract_headings(llm, text):
+    """Headings copied from the user's text. Anything the model returns that is not in the text is dropped,
+    so no invented heading can get through."""
+    data = llm.generate(prompts.HEADINGS.format(text=" \n".join(text.splitlines())[:120000]),
+                        task="headings", json_mode=True, temperature=0, max_tokens=8000)
+    src_norm = " " + _norm(text) + " "
+    exact = {}  # normalised line -> the line exactly as the user typed it
+    for line in text.splitlines():
+        raw = _NUM.sub("", line).strip().strip(":").strip()
+        if raw and len(raw.split()) <= 20:
+            exact.setdefault(_norm(raw), raw)
+    out, seen = [], set()
+    for h in (data or {}).get("headings", []):
+        t = _NUM.sub("", str(h.get("text", ""))).strip().strip(":").strip()
+        n = _norm(t)
+        if not n or _SKIP.match(n) or len(n.split()) > 20:
+            continue
+        if " " + n + " " not in src_norm:      # not in the user's text: drop it
+            continue
+        lvl = 2 if str(h.get("level", 1)) == "2" else 1
+        key = (lvl, n)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"text": exact.get(n, t), "level": lvl, "pos": src_norm.find(" " + n + " ")})
+    # keep the order of the user's text
+    out.sort(key=lambda h: h["pos"])
+    chapters = []
+    for h in out:
+        if h["level"] == 1 or not chapters:
+            chapters.append({"title": h["text"], "sections": []})
+        else:
+            chapters[-1]["sections"].append({"title": h["text"], "brief": h["text"]})
+    return chapters
+
+
+def stage_plan_fixed(ctx, fixed):
+    j = ctx.job
+    d = j["details"]
+    outline = []
+    for i, c in enumerate(fixed, 1):
+        outline.append(f"{i}. {c['title']}")
+        for k, sct in enumerate(c["sections"]):
+            outline.append(f"   {i}.{k + 1} {sct['title']}")
+    pages = j["pages"]
+    info = ctx.llm.generate(prompts.PLAN_FIXED.format(
+        title=d["title"], department=j["department"], outline="\n".join(outline), pages=pages,
+        n_landmarks=10 if pages >= 40 else 5, n_tables=j.get("n_tables", 3), n_figs=j.get("n_figures", 1)),
+        task="plan", json_mode=True, temperature=0.3, max_tokens=12000) or {}
+    by_num = {}
+    for c in info.get("chapters", []):
+        try:
+            by_num[int(c.get("number"))] = c
+        except (TypeError, ValueError):
+            pass
+    default_w = {"intro": 6, "aims": 1, "review": 18, "discussion": 12, "summary": 3, "narrative": 10}
+    chapters = []
+    for i, c in enumerate(fixed, 1):
+        extra = by_num.get(i, {})
+        kind = guess_kind(c["title"])
+        if kind in ("review", "summary", "aims") and c["sections"]:
+            kind = "narrative"          # the user gave sub-headings: write under each of them
+        briefs = extra.get("section_briefs") or []
+        secs = [{"title": sct["title"], "brief": (briefs[k] if k < len(briefs) and briefs[k] else sct["title"])}
+                for k, sct in enumerate(c["sections"])]
+        if not secs:
+            secs = [{"title": c["title"], "brief": extra.get("brief") or c["title"]}]
+        try:
+            w = float(extra.get("weight") or default_w[kind])
+        except (TypeError, ValueError):
+            w = default_w[kind]
+        chapters.append({"key": f"c{i}", "title": c["title"], "kind": kind, "weight": w, "sections": secs,
+                         "queries": [q for q in (extra.get("queries") or []) if q.strip()] or [f"({c['title']}) AND ({d['title']})"],
+                         "fixed": True})
+
+    def place(items, limit):
+        res = []
+        for v in items or []:
+            try:
+                n = int(v.get("chapter"))
+            except (TypeError, ValueError):
+                continue
+            if 1 <= n <= len(chapters):
+                res.append(dict(v, chapter=f"c{n}"))
+        return res[:limit]
+    plan = {"chapters": chapters, "landmarks": info.get("landmarks", []),
+            "tables": place(info.get("tables"), j.get("n_tables", 3)),
+            "flowcharts": place(info.get("flowcharts"), j.get("n_figures", 1)), "fixed_headings": True}
+    _fill_visual_slots(plan, j.get("n_tables", 3), j.get("n_figures", 1))
+    return plan
+
+
 def stage_plan(ctx):
     j = ctx.job
     d = j["details"]
@@ -185,6 +301,23 @@ def stage_plan(ctx):
     pages = j["pages"]
     max_topic = 2 if pages < 25 else 4 if pages < 60 else 7
     max_sections = 3 if pages < 25 else 5 if pages < 80 else 7
+    syn_text = (ctx.st.read_json(ctx.id, "synopsis.json", {}) or {}).get("text", "")
+    if j.get("strict_headings"):
+        fixed = extract_headings(ctx.llm, syn_text) if syn_text.strip() else []
+        if not fixed:
+            raise RuntimeError("No headings were found in your synopsis text. Put each heading on its own line "
+                               "(sub-headings numbered like 2.1), or untick 'Use only my headings'.")
+        ctx.log(f"Using your {len(fixed)} headings exactly: " + "; ".join(c["title"] for c in fixed))
+        plan = stage_plan_fixed(ctx, fixed)
+        j["plan"] = plan
+        budget(j)
+        ctx.mark("plan")
+        if j.get("review_outline"):
+            j["status"] = "awaiting_approval"
+            ctx.log("Chapter plan ready. Check it and press Approve to continue.")
+            ctx.save(force=True)
+            raise Stopped()
+        return
     plan = ctx.llm.generate(prompts.PLAN.format(
         title=d["title"], department=j["department"], aim=d.get("aim", ""),
         objectives="; ".join(d.get("objectives") or []), scope=(d.get("scope", "") + " " + d.get("methodology", ""))[:3000],
@@ -224,7 +357,13 @@ def stage_plan(ctx):
 
 def _fill_visual_slots(plan, n_tables, n_figs):
     """Make sure the requested number of tables and flowcharts exist, in topic chapters."""
-    topic = [c for c in plan["chapters"] if c["kind"] in ("narrative", "discussion", "intro")] or plan["chapters"]
+    ok = {c["key"] for c in plan["chapters"] if c["kind"] in ("narrative", "discussion", "intro")}
+    plan["tables"] = [t for t in plan.get("tables", []) if t.get("chapter") in ok]
+    plan["flowcharts"] = [f for f in plan.get("flowcharts", []) if f.get("chapter") in ok]
+    topic = ([c for c in plan["chapters"] if c["kind"] in ("narrative", "discussion")]
+             or [c for c in plan["chapters"] if c["key"] in ok])
+    if not topic:
+        return
     i = 0
     while len(plan["tables"]) < n_tables and topic:
         c = topic[i % len(topic)]
@@ -439,7 +578,7 @@ def _write_section(ctx, t, lib, visuals, usage):
     text = ctx.llm.generate(prompts.SECTION.format(
         section=sec["title"], chapter=c["title"], title=j["details"]["title"], department=j["department"],
         brief=sec.get("brief", ""), outline=outline_text(j["plan"]), visual_note=visual_note,
-        words=first, continuation="", sources=fmt_sources(rel)),
+        subheading_rule=_subrule(j), words=first, continuation="", sources=fmt_sources(rel)),
         task="section", system=prompts.SYSTEM_WRITER, temperature=0.65, max_tokens=12000)
     loops = 0
     while words(text) < 0.85 * target and loops < 4:
@@ -451,7 +590,7 @@ def _write_section(ctx, t, lib, visuals, usage):
         add = ctx.llm.generate(prompts.SECTION.format(
             section=sec["title"], chapter=c["title"], title=j["details"]["title"], department=j["department"],
             brief=sec.get("brief", ""), outline=outline_text(j["plan"]), visual_note="",
-            words=more, continuation=prompts.CONTINUE.format(tail=tail, covered="; ".join(heads) or "see text", words=more),
+            subheading_rule=_subrule(j), words=more, continuation=prompts.CONTINUE.format(tail=tail, covered="; ".join(heads) or "see text", words=more),
             sources=fmt_sources(rel)), task="continue", system=prompts.SYSTEM_WRITER, temperature=0.65, max_tokens=12000)
         text = text.rstrip() + "\n\n" + add.strip()
     return text.strip()
@@ -483,6 +622,18 @@ def _write_review(ctx, t, lib):
         ctx.st.write_json(ctx.id, "review_entries.json", entries)
         ctx.log(f"Review of literature: {len(entries)}/{len(picked)} entries written")
     return {"order": [s["sid"] for s in picked if s["sid"] in entries]}
+
+
+def _subrule(j):
+    if j.get("plan", {}).get("fixed_headings"):
+        return ("Do NOT add any sub-headings or headings of your own; write continuous paragraphs only "
+                "(the user's headings are fixed).")
+    return 'You may use up to three sub-headings, each on its own line starting with "### ".'
+
+
+def _strip_headings(text):
+    """Remove any heading line the writer added despite the rule (fixed-headings mode)."""
+    return re.sub(r"(?m)^\s*#{1,6}\s+.*$\n?", "", text or "")
 
 
 def stage_write(ctx):
@@ -545,7 +696,12 @@ def stage_summary(ctx):
                 body = " ".join(CITE.sub("", texts.get(f"{c['key']}:{i}", "")) for i in range(len(c.get("sections", []))))
                 digests.append(f"## {c['title']}\n" + " ".join(body.split()[:2500]))
         texts[f"{summ[0]['key']}:summary"] = ctx.llm.generate(
-            prompts.SUMMARY.format(words=summ[0]["words"], title=j["details"]["title"], digests="\n\n".join(digests)),
+            prompts.SUMMARY.format(summary_structure=(
+                "continuous paragraphs only, with NO sub-headings of any kind: first summarise the dissertation, "
+                "then give the conclusions." if j["plan"].get("fixed_headings") else
+                'two to four paragraphs summarising the dissertation, then a line "### Conclusion" followed by one '
+                'or two paragraphs of conclusions, then "### Recommendations" with 3-6 short bullet points ("- ") '
+                "for clinical practice and future research."), words=summ[0]["words"], title=j["details"]["title"], digests="\n\n".join(digests)),
             task="summary", system=prompts.SYSTEM_WRITER, temperature=0.4, max_tokens=8000)
         ctx.st.write_json(ctx.id, "texts.json", texts, force=True)
     ctx.mark("summary")
@@ -642,13 +798,18 @@ def stage_assemble(ctx):
                 w += words(entries[sid]) + 4
         elif c["kind"] == "summary":
             t = texts.get(f"{c['key']}:summary", "")
+            if j["plan"].get("fixed_headings"):
+                t = _strip_headings(t)
             blocks.append({"type": "text", "text": CITE.sub("", t)})
             w = words(t)
         else:
             for i, sec in enumerate(c.get("sections", [])):
                 t = texts.get(f"{c['key']}:{i}", "")
+                fixed = j["plan"].get("fixed_headings")
+                if fixed:
+                    t = _strip_headings(t)
                 if len(c["sections"]) > 1 or sec["title"].lower() != c["title"].lower():
-                    blocks.append({"type": "h2", "text": sec["title"].upper()})
+                    blocks.append({"type": "h2", "text": sec["title"] if fixed else sec["title"].upper()})
                 blocks.append({"type": "text", "text": convert(t)})
                 w += words(t)
                 for v in sorted([v for v in visuals if v["chapter"] == c["key"] and v["after_section"] == i],
@@ -665,7 +826,8 @@ def stage_assemble(ctx):
                         blocks.append({"type": "figure", "number": v["number"], "title": v.get("title") or v["plan_title"],
                                        "png": render_flowchart(v), "note": note})
         words_by_ch[c["title"]] = (w, c.get("words", 0))
-        chapters.append({"title": c["title"], "header": c["title"].title() if c["title"].isupper() else c["title"],
+        chapters.append({"display": c["title"] if j["plan"].get("fixed_headings") else None,
+                         "title": c["title"], "header": c["title"].title() if c["title"].isupper() else c["title"],
                          "blocks": blocks})
 
     refs = [src.Source.from_dict(lib[sid]).vancouver() for sid, _ in sorted(numbering.items(), key=lambda x: x[1])]

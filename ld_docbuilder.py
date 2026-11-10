@@ -475,9 +475,9 @@ def build_document(model: dict) -> bytes:
         if s.get("divider_pages"):
             for _ in range(12):
                 b.para("", spacing=1.5)
-            b.para(U(ch["title"]), align="center", bold=True, size=22, spacing=1.2)
+            b.para(ch.get("display") or U(ch["title"]), align="center", bold=True, size=22, spacing=1.2)
             b.page_break()
-        b.heading(U(ch["title"]), 1)
+        b.heading(ch.get("display") or U(ch["title"]), 1)
         for blk in ch["blocks"]:
             t = blk["type"]
             if t == "h2":
