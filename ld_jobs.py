@@ -48,7 +48,7 @@ class JobManager:
 
 def create_job(storage, *, topic, department, pages, settings, synopsis_name=None, synopsis_bytes=None,
                n_tables=3, n_figures=1, include_review=True, review_outline=False, details=None,
-               front_matter=False, include_aims=False, strict_headings=True):
+               front_matter=False, include_aims=False, strict_headings=True, n_images=6):
     job_id = datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
     text, pdf_b64 = "", ""
     if synopsis_bytes:
@@ -63,6 +63,7 @@ def create_job(storage, *, topic, department, pages, settings, synopsis_name=Non
         "settings": st, "n_tables": int(n_tables), "n_figures": int(n_figures),
         "include_review": include_review, "review_outline": review_outline,
         "front_matter": front_matter, "include_aims": include_aims, "strict_headings": strict_headings,
+        "n_images": int(n_images),
         "details": {k: v for k, v in (details or {}).items() if v},
         "status": "queued", "stage": "analyse", "progress": 0.0, "stages_done": [],
         "created": datetime.now().isoformat(timespec="seconds"), "log": [],
@@ -144,7 +145,9 @@ def reset_from(storage, job_id, stage):
         storage.write_json(job_id, "texts.json", {}, force=True)
         storage.write_json(job_id, "review_entries.json", {}, force=True)
     if "visuals" in later:
-        storage.write_json(job_id, "visuals.json", [], force=True)
+        keep = [] if "images" in later else [v for v in (storage.read_json(job_id, "visuals.json", []) or [])
+                                             if v.get("kind") == "image"]
+        storage.write_json(job_id, "visuals.json", keep, force=True)
     job["status"] = "queued"
     job["progress"] = sum(pipeline.STAGE_WEIGHT[s] for s in pipeline.STAGES[:idx])
     storage.write_json(job_id, "job.json", job, force=True)

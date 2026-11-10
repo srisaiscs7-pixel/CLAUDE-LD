@@ -207,3 +207,23 @@ Return JSON:
   "tables": [{{"chapter": 1, "after_section": 0, "title": "", "purpose": ""}}],
   "flowcharts": [{{"chapter": 1, "after_section": 0, "title": "", "purpose": ""}}]}}
 """
+
+IMAGE_QUERIES = """Suggest {n} short search phrases (2-4 words, English) to find good illustrative images on
+Wikimedia Commons for an MDS library dissertation titled "{title}" (Department of {department}).
+Prefer anatomy diagrams, radiographs, clinical or surgical photographs, instruments and classic illustrations
+that match these chapters: {outline}
+Return JSON: {{"queries": [""]}}"""
+
+IMAGE_PICK = """You are choosing illustrations for the MDS library dissertation "{title}".
+The candidate images are attached in the same order as this list (image 1 is the first attachment):
+{candidates}
+
+Chapters where an image may be placed (number, then 0-based section indexes):
+{outline}
+
+Choose the {n} best images: clearly relevant to the subject, academically appropriate, readable, not
+duplicates, and spread across different chapters where possible. Reject logos, unrelated pictures, images
+of identifiable patients' full faces, and low-quality pictures. If fewer than {n} are suitable, choose fewer.
+For each, give a short factual figure caption (max 20 words) that describes what the image shows.
+
+Return JSON: {{"picks": [{{"id": 1, "chapter": 1, "after_section": 0, "caption": ""}}]}}"""

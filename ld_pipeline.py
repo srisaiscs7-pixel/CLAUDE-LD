@@ -16,15 +16,16 @@ import ld_prompts as prompts
 import ld_sources as src
 from ld_docbuilder import build_document
 from ld_visuals import render_flowchart
+import ld_images as imgs
 
 CITE = re.compile(r"\s?\[(S\d+(?:\s*[;,]\s*S\d+)*)\]")
-STAGES = ["analyse", "plan", "library", "visuals", "write", "summary", "assemble"]
+STAGES = ["analyse", "plan", "library", "images", "visuals", "write", "summary", "assemble"]
 STAGE_LABEL = {
-    "analyse": "Reading the synopsis", "plan": "Planning chapters", "library": "Finding references",
+    "analyse": "Reading the synopsis", "plan": "Planning chapters", "library": "Finding references", "images": "Finding images",
     "visuals": "Designing tables and flowcharts", "write": "Writing chapters",
     "summary": "Writing summary and conclusion", "assemble": "Building the Word file",
 }
-STAGE_WEIGHT = {"analyse": 0.02, "plan": 0.04, "library": 0.12, "visuals": 0.06, "write": 0.66,
+STAGE_WEIGHT = {"analyse": 0.02, "plan": 0.04, "library": 0.11, "images": 0.04, "visuals": 0.05, "write": 0.64,
                 "summary": 0.04, "assemble": 0.06}
 
 
@@ -401,15 +402,16 @@ def _fill_visual_slots(plan, n_tables, n_figs):
     if not topic:
         return
     i = 0
+    plain = lambda c: re.sub(r"^\s*\d+(?:\.\d+)*\.?\s*", "", c["title"]).lower()
     while len(plan["tables"]) < n_tables and topic:
         c = topic[i % len(topic)]
         plan["tables"].append({"chapter": c["key"], "after_section": 0,
-                               "title": f"Summary of key aspects of {c['title'].lower()}", "purpose": c["title"]})
+                               "title": f"Summary of key aspects of {plain(c)}", "purpose": c["title"]})
         i += 1
     while len(plan["flowcharts"]) < n_figs and topic:
         c = topic[(i + 1) % len(topic)]
         plan["flowcharts"].append({"chapter": c["key"], "after_section": max(0, len(c.get("sections", [])) - 1),
-                                   "title": f"Flowchart of {c['title'].lower()}", "purpose": c["title"]})
+                                   "title": f"Flowchart of {plain(c)}", "purpose": c["title"]})
         i += 1
 
 
@@ -529,6 +531,103 @@ def _rebalance_review(j, lib):
             x["words"] += spare // max(1, len(others))
 
 
+def stage_images(ctx):
+    """Openly licensed images from Wikimedia Commons and open-access articles, chosen by Gemini."""
+    j = ctx.job
+    n = int(j.get("n_images", 0) or 0)
+    out = [v for v in (ctx.st.read_json(ctx.id, "visuals.json", []) or []) if v.get("kind") != "image"]
+    if n <= 0:
+        ctx.mark("images")
+        return
+    plan = j["plan"]
+    lib = ctx.st.read_json(ctx.id, "library.json", [])
+    allowed = [(i, c) for i, c in enumerate(plan["chapters"], 1) if c["kind"] in ("intro", "narrative", "discussion")]
+    if not allowed:
+        ctx.mark("images")
+        return
+    ctx.progress("images", 0.05, "Searching Wikimedia Commons and open-access articles for images")
+    try:
+        q = ctx.llm.generate(prompts.IMAGE_QUERIES.format(n=8, title=j["details"]["title"], department=j["department"],
+                                                          outline=outline_text(plan)[:3000]),
+                             task="image_queries", json_mode=True, temperature=0.3, max_tokens=2000)
+        queries = [x for x in (q or {}).get("queries", []) if isinstance(x, str) and x.strip()][:8]
+    except Exception:
+        queries = []
+    queries = queries or [j["details"]["title"]]
+    cands, seen = [], set()
+    for qi, qq in enumerate(queries):
+        ctx.check_stop()
+        for c in imgs.commons_search(qq, 6):
+            if c["url"] not in seen:
+                seen.add(c["url"])
+                cands.append(c)
+    by_pmc = {s["pmcid"]: s for s in lib if s.get("pmcid")}
+    for k, (pmcid, s) in enumerate(list(by_pmc.items())[:15]):
+        ctx.check_stop()
+        for f in imgs.epmc_figures(pmcid)[:4]:
+            f["sid"] = s["sid"]
+            cands.append(f)
+    ctx.progress("images", 0.4, f"{len(cands)} candidate images found; downloading previews")
+    # download small previews so Gemini can look at the pictures themselves
+    pool = []
+    for c in cands:
+        if len(pool) >= 30:
+            break
+        ctx.check_stop()
+        small = imgs.download(c["small"], 400)
+        if small:
+            c["_preview"] = small
+            pool.append(c)
+    if not pool:
+        ctx.log("No suitable openly licensed images were found; continuing without images.")
+        ctx.mark("images")
+        return
+    lines = []
+    for k, c in enumerate(pool, 1):
+        where = "Wikimedia Commons" if c["source"] == "commons" else "open-access article figure"
+        lines.append(f"{k}. [{where}] {c['title']}: {c['desc'][:300]}")
+    outl = []
+    for i, c in allowed:
+        outl.append(f"{i}. {c['title']} (sections: " + "; ".join(f"{k}={x['title']}" for k, x in enumerate(c['sections'])) + ")")
+    picks = ctx.llm.generate(prompts.IMAGE_PICK.format(title=j["details"]["title"], candidates="\n".join(lines),
+                                                       outline="\n".join(outl), n=n),
+                             task="image_pick", json_mode=True, temperature=0.2, max_tokens=4000,
+                             files=[(imgs.thumbnail(c["_preview"]), "image/jpeg") for c in pool]) or {}
+    ok_ch = {i: c for i, c in allowed}
+    chosen = []
+    for p in picks.get("picks", []):
+        try:
+            k, chn, aft = int(p.get("id")), int(p.get("chapter")), int(p.get("after_section", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if not (1 <= k <= len(pool)) or any(x[0] == k for x in chosen):
+            continue
+        if chn not in ok_ch:  # move to the nearest chapter that can hold figures
+            chn = min(ok_ch, key=lambda x: abs(x - chn))
+        aft = max(0, min(aft, len(ok_ch[chn]["sections"]) - 1))
+        chosen.append((k, chn, aft, (p.get("caption") or pool[k - 1]["title"]).strip().rstrip(".")))
+        if len(chosen) >= n:
+            break
+    count = 0
+    for k, chn, aft, cap in chosen:
+        ctx.check_stop()
+        c = pool[k - 1]
+        full = imgs.download(c["url"], 1600)
+        if not full:
+            continue
+        count += 1
+        fname = f"image_{count}.jpg"
+        ctx.st.write_bytes(ctx.id, fname, full)
+        out.append({"kind": "image", "chapter": f"c{chn}", "plan_title": cap, "title": cap,
+                    "after_section": aft, "file": fname, "source": c["source"], "licence": c["licence"],
+                    "artist": c.get("artist", ""), "page": c.get("page", ""), "sid": c.get("sid", ""),
+                    "orig_title": c["title"]})
+        ctx.progress("images", 0.5 + 0.5 * count / max(1, len(chosen)), f"Image {count}: {cap[:80]}")
+    ctx.st.write_json(ctx.id, "visuals.json", out, force=True)
+    ctx.log(f"{count} openly licensed images added")
+    ctx.mark("images")
+
+
 def stage_visuals(ctx):
     j = ctx.job
     plan = j["plan"]
@@ -567,12 +666,14 @@ def stage_visuals(ctx):
         except Exception as e:
             ctx.log(f"Skipped {kind} '{sp['title']}': {e}")
     # number in document order
-    for kind in ("table", "flowchart"):
-        vs = sorted([v for v in out if v["kind"] == kind], key=lambda v: (order.get(v["chapter"], 99), v["after_section"]))
+    for kinds in (("table",), ("flowchart", "image")):
+        vs = sorted([v for v in out if v["kind"] in kinds],
+                    key=lambda v: (order.get(v["chapter"], 99), v["after_section"], v["kind"] == "image"))
         for n, v in enumerate(vs, 1):
             v["number"] = n
     ctx.st.write_json(ctx.id, "visuals.json", out, force=True)
-    ctx.log(f"{sum(v['kind'] == 'table' for v in out)} tables and {sum(v['kind'] == 'flowchart' for v in out)} flowcharts ready")
+    ctx.log(f"{sum(v['kind'] == 'table' for v in out)} tables, {sum(v['kind'] == 'flowchart' for v in out)} "
+            f"flowcharts and {sum(v['kind'] == 'image' for v in out)} images ready")
     ctx.mark("visuals")
 
 
@@ -859,6 +960,18 @@ def stage_assemble(ctx):
                         blocks.append({"type": "table", "number": v["number"], "title": v.get("title") or v["plan_title"],
                                        "columns": v["columns"], "rows": v["rows"],
                                        "note": (v.get("note", "") + " " + note).strip()})
+                    elif v["kind"] == "image":
+                        data = ctx.st.read_bytes(ctx.id, v["file"])
+                        if not data:
+                            continue
+                        if v["source"] == "epmc" and v.get("sid") in lib:
+                            credit = (f"Source: reproduced from {src.Source.from_dict(lib[v['sid']]).short_cite()}"
+                                      f"⟦{num(v['sid'])}⟧, {v['licence']}.")
+                        else:
+                            credit = (f"Source: {v.get('artist') or 'Unknown author'}, via Wikimedia Commons, "
+                                      f"{v['licence']}.")
+                        blocks.append({"type": "figure", "number": v["number"], "title": v["title"], "png": data,
+                                       "note": credit, "width": 12.5})
                     else:
                         blocks.append({"type": "figure", "number": v["number"], "title": v.get("title") or v["plan_title"],
                                        "png": render_flowchart(v), "note": note})
@@ -874,7 +987,7 @@ def stage_assemble(ctx):
     d["university"] = d.get("university") or j["settings"].get("university", "")
     model = {"front_matter": j.get("front_matter", True), "settings": j["settings"], "details": d, "chapters": chapters, "references": refs,
              "abbreviations": abbreviations(CITE.sub("", all_text)) if j.get("abbreviations", True) else [],
-             "n_tables": sum(v["kind"] == "table" for v in visuals), "n_figures": sum(v["kind"] == "flowchart" for v in visuals)}
+             "n_tables": sum(v["kind"] == "table" for v in visuals), "n_figures": sum(v["kind"] in ("flowchart", "image") for v in visuals)}
     ctx.progress("assemble", 0.6, "Saving the Word file")
     data = build_document(model)
     safe = re.sub(r"[^A-Za-z0-9]+", "_", d["title"])[:60].strip("_") or "Dissertation"
@@ -889,7 +1002,8 @@ def stage_assemble(ctx):
     lines = [f"Quality report – {d['title']}", "",
              f"Estimated length: about {est_pages:.0f} pages (target {j['pages']}).",
              f"References cited: {len(refs)} (all taken from Europe PMC, PubMed or Crossref records).",
-             f"Tables: {model['n_tables']}  ·  Flowcharts: {model['n_figures']}", "",
+             f"Tables: {model['n_tables']}  ·  Flowcharts: {sum(v['kind'] == 'flowchart' for v in visuals)}"
+             f"  ·  Images: {sum(v['kind'] == 'image' for v in visuals)} (each credited under the figure)", "",
              "Words per chapter (written / planned):"]
     for t, (w, p) in words_by_ch.items():
         lines.append(f"  {t}: {w} / {p}")
@@ -907,7 +1021,8 @@ def stage_assemble(ctx):
     ctx.mark("assemble")
 
 
-STAGE_FN = {"analyse": stage_analyse, "plan": stage_plan, "library": stage_library, "visuals": stage_visuals,
+STAGE_FN = {"analyse": stage_analyse, "plan": stage_plan, "library": stage_library, "images": stage_images,
+            "visuals": stage_visuals,
             "write": stage_write, "summary": stage_summary, "assemble": stage_assemble}
 
 

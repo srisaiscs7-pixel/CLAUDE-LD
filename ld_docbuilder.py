@@ -497,7 +497,7 @@ def build_document(model: dict) -> bytes:
             elif t == "table":
                 b.table(blk["number"], blk["title"], blk["columns"], blk["rows"], blk.get("note", ""))
             elif t == "figure":
-                b.figure(blk["number"], blk["title"], blk["png"], note=blk.get("note", ""))
+                b.figure(blk["number"], blk["title"], blk["png"], width_cm=blk.get("width", 15.0), note=blk.get("note", ""))
 
     # References
     b.new_section("References", None, None, divider=s.get("divider_pages", False))

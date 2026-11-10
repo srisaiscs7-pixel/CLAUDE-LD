@@ -138,6 +138,8 @@ with st.sidebar:
             except Exception as e:
                 res[f"Gemini ({model_name()})"] = f"Failed: {str(e)[:200]}"
             res.update(src.check_connections(NCBI))
+            import ld_images
+            res["Wikimedia Commons (images)"] = ld_images.check()
             if isinstance(storage, GitHubStorage):
                 try:
                     res["GitHub storage"] = storage.check()
@@ -191,6 +193,9 @@ with tab_new:
                                             index=0 if p["page_number_pos"] == "center" else 1, horizontal=True)
         n_tables = st.slider("Tables", 2, 4, 3)
         n_figs = st.slider("Flowcharts", 1, 2, 1)
+        n_images = st.slider("Images from the web", 0, 7, 6,
+                             help="Openly licensed pictures (Wikimedia Commons and open-access journal figures), "
+                                  "chosen by Gemini to match your chapters, each credited under the figure.")
         st.markdown("**Headings**")
         strict = st.checkbox("Use ONLY the headings in my synopsis – no new headings", True,
                              help="The chapters and sub-headings are copied exactly from your pasted text or "
@@ -227,7 +232,7 @@ with tab_new:
                               synopsis_bytes=syn.getvalue() if syn else (syn_text.encode("utf-8") if syn_text.strip() else None),
                               n_tables=n_tables, n_figures=n_figs, include_review=include_review,
                               review_outline=review_outline, details=det,
-                              front_matter=front_matter, include_aims=include_aims,
+                              front_matter=front_matter, include_aims=include_aims, n_images=n_images,
                               strict_headings=strict and bool(syn or syn_text.strip()))
         start(jid)
         st.session_state.open_job = jid
@@ -316,7 +321,7 @@ def job_view(jid):
                 else:
                     st.success("Saved. They will be used when the job finishes.")
         with st.expander("🔁 Redo part of the work"):
-            stage = st.selectbox("Redo from", ["write", "visuals", "library", "plan"], key=f"redo{jid}",
+            stage = st.selectbox("Redo from", ["write", "visuals", "images", "library", "plan"], key=f"redo{jid}",
                                  format_func=lambda s: pipeline.STAGE_LABEL[s])
             st.caption("Everything after this step is redone (costs Gemini tokens again).")
             if st.button("Redo", key=f"rd{jid}"):
