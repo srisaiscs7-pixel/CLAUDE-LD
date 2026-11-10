@@ -183,7 +183,11 @@ class Builder:
 
     def new_section(self, header_text: str | None, numbering: str | None = None, start: int | None = None,
                     divider: bool = False):
-        sec = self.doc.add_section(WD_SECTION.NEW_PAGE)
+        if getattr(self, "_reuse_first", False):  # content-only document: use the first page
+            self._reuse_first = False
+            sec = self.doc.sections[0]
+        else:
+            sec = self.doc.add_section(WD_SECTION.NEW_PAGE)
         self._page_setup(sec)
         sec.header.is_linked_to_previous = False
         sec.footer.is_linked_to_previous = False
@@ -360,105 +364,108 @@ def build_document(model: dict) -> bytes:
     U = lambda x: (x or "").upper()
     dept_full = d.get("department_full") or d.get("department", "")
 
-    # Title page (first section, no header/footer)
-    sec0 = b.doc.sections[0]
-    sec0.different_first_page_header_footer = False
-    b.para("", spacing=1.0, after=30)
-    b.para(f"“{U(d.get('title'))}”", align="center", bold=True, size=16, spacing=1.3, after=24)
-    b.para("A LIBRARY DISSERTATION", align="center", bold=True, size=13, spacing=1.2, after=6)
-    b.para("Submitted to", align="center", spacing=1.2, after=2)
-    b.para(d.get("university") or "{{[University name]}}", align="center", bold=True, spacing=1.2, after=18)
-    b.para("In partial fulfilment of the requirements for the degree of", align="center", spacing=1.2, after=4)
-    b.para("MASTER OF DENTAL SURGERY", align="center", bold=True, size=13, spacing=1.2, after=4)
-    b.para("in", align="center", spacing=1.2, after=4)
-    b.para(U(dept_full), align="center", bold=True, spacing=1.2, after=24)
-    b.para("By", align="center", spacing=1.2, after=4)
-    b.para(f"Dr. {d.get('candidate_name') or '{{[Candidate name]}}'}", align="center", bold=True, size=13, spacing=1.2, after=24)
-    b.para("Under the guidance of", align="center", spacing=1.2, after=4)
-    b.para(f"Dr. {d.get('guide_name') or '{{[Guide name]}}'}", align="center", bold=True, spacing=1.2, after=2)
-    b.para(d.get("guide_designation") or "{{[Designation]}}", align="center", spacing=1.2, after=36)
-    b.para(f"DEPARTMENT OF {U(dept_full)}", align="center", bold=True, spacing=1.2, after=2)
-    b.para(U(d.get("college")) or "{{[COLLEGE NAME]}}", align="center", bold=True, spacing=1.2, after=2)
-    b.para(d.get("academic_year") or "{{[Year]}}", align="center", bold=True, spacing=1.2)
+    if not model.get("front_matter", True):
+        b._reuse_first = True
+    else:
+        # Title page (first section, no header/footer)
+        sec0 = b.doc.sections[0]
+        sec0.different_first_page_header_footer = False
+        b.para("", spacing=1.0, after=30)
+        b.para(f"“{U(d.get('title'))}”", align="center", bold=True, size=16, spacing=1.3, after=24)
+        b.para("A LIBRARY DISSERTATION", align="center", bold=True, size=13, spacing=1.2, after=6)
+        b.para("Submitted to", align="center", spacing=1.2, after=2)
+        b.para(d.get("university") or "{{[University name]}}", align="center", bold=True, spacing=1.2, after=18)
+        b.para("In partial fulfilment of the requirements for the degree of", align="center", spacing=1.2, after=4)
+        b.para("MASTER OF DENTAL SURGERY", align="center", bold=True, size=13, spacing=1.2, after=4)
+        b.para("in", align="center", spacing=1.2, after=4)
+        b.para(U(dept_full), align="center", bold=True, spacing=1.2, after=24)
+        b.para("By", align="center", spacing=1.2, after=4)
+        b.para(f"Dr. {d.get('candidate_name') or '{{[Candidate name]}}'}", align="center", bold=True, size=13, spacing=1.2, after=24)
+        b.para("Under the guidance of", align="center", spacing=1.2, after=4)
+        b.para(f"Dr. {d.get('guide_name') or '{{[Guide name]}}'}", align="center", bold=True, spacing=1.2, after=2)
+        b.para(d.get("guide_designation") or "{{[Designation]}}", align="center", spacing=1.2, after=36)
+        b.para(f"DEPARTMENT OF {U(dept_full)}", align="center", bold=True, spacing=1.2, after=2)
+        b.para(U(d.get("college")) or "{{[COLLEGE NAME]}}", align="center", bold=True, spacing=1.2, after=2)
+        b.para(d.get("academic_year") or "{{[Year]}}", align="center", bold=True, spacing=1.2)
 
-    cand = f"Dr. {d.get('candidate_name') or '{{[Candidate name]}}'}"
-    guide = f"Dr. {d.get('guide_name') or '{{[Guide name]}}'}"
-    college = d.get("college") or "{{[College name]}}"
-    univ = d.get("university") or "{{[University]}}"
-    title_q = f"“{d.get('title')}”"
-    place = d.get("place") or "{{[Place]}}"
+        cand = f"Dr. {d.get('candidate_name') or '{{[Candidate name]}}'}"
+        guide = f"Dr. {d.get('guide_name') or '{{[Guide name]}}'}"
+        college = d.get("college") or "{{[College name]}}"
+        univ = d.get("university") or "{{[University]}}"
+        title_q = f"“{d.get('title')}”"
+        place = d.get("place") or "{{[Place]}}"
 
-    def front(title):
-        b.new_section(None, "lowerRoman", 1 if title == "DECLARATION BY THE CANDIDATE" else None)
-        b.para(title, align="center", bold=True, size=14, spacing=1.2, after=30)
+        def front(title):
+            b.new_section(None, "lowerRoman", 1 if title == "DECLARATION BY THE CANDIDATE" else None)
+            b.para(title, align="center", bold=True, size=14, spacing=1.2, after=30)
 
-    def sign(left, right):
-        t = b.doc.add_table(rows=1, cols=2)
-        for i, lines in enumerate((left, right)):
-            cell = t.rows[0].cells[i]
-            cell.paragraphs[0].text = ""
-            for k, line in enumerate(lines):
-                p = cell.paragraphs[0] if k == 0 else cell.add_paragraph()
-                p.alignment = WD_ALIGN_PARAGRAPH.LEFT if i == 0 else WD_ALIGN_PARAGRAPH.RIGHT
-                b.inline(p, line, bold=line.startswith("Dr.") or line.isupper())
-        b.para("", after=6)
+        def sign(left, right):
+            t = b.doc.add_table(rows=1, cols=2)
+            for i, lines in enumerate((left, right)):
+                cell = t.rows[0].cells[i]
+                cell.paragraphs[0].text = ""
+                for k, line in enumerate(lines):
+                    p = cell.paragraphs[0] if k == 0 else cell.add_paragraph()
+                    p.alignment = WD_ALIGN_PARAGRAPH.LEFT if i == 0 else WD_ALIGN_PARAGRAPH.RIGHT
+                    b.inline(p, line, bold=line.startswith("Dr.") or line.isupper())
+            b.para("", after=6)
 
-    front("DECLARATION BY THE CANDIDATE")
-    b.para(f"I hereby declare that this library dissertation entitled **{title_q}** is a bonafide and genuine work "
-           f"carried out by me under the guidance of **{guide}**, {d.get('guide_designation') or '{{[Designation]}}'}, "
-           f"Department of {dept_full}, {college}.", spacing=2.0)
-    b.para("", spacing=2.0, after=40)
-    sign(["Date:", f"Place: {place}"], ["Signature of the candidate", "", cand])
+        front("DECLARATION BY THE CANDIDATE")
+        b.para(f"I hereby declare that this library dissertation entitled **{title_q}** is a bonafide and genuine work "
+               f"carried out by me under the guidance of **{guide}**, {d.get('guide_designation') or '{{[Designation]}}'}, "
+               f"Department of {dept_full}, {college}.", spacing=2.0)
+        b.para("", spacing=2.0, after=40)
+        sign(["Date:", f"Place: {place}"], ["Signature of the candidate", "", cand])
 
-    front("CERTIFICATE BY THE GUIDE")
-    b.para(f"This is to certify that the library dissertation entitled **{title_q}** is a bonafide work done by "
-           f"**{cand}** in partial fulfilment of the requirements for the degree of **Master of Dental Surgery** in "
-           f"**{dept_full}**.", spacing=2.0)
-    b.para("", spacing=2.0, after=40)
-    sign(["Date:", f"Place: {place}"], ["Signature of the guide", "", guide, d.get("guide_designation") or "{{[Designation]}}",
-                                          f"Department of {dept_full}", college])
+        front("CERTIFICATE BY THE GUIDE")
+        b.para(f"This is to certify that the library dissertation entitled **{title_q}** is a bonafide work done by "
+               f"**{cand}** in partial fulfilment of the requirements for the degree of **Master of Dental Surgery** in "
+               f"**{dept_full}**.", spacing=2.0)
+        b.para("", spacing=2.0, after=40)
+        sign(["Date:", f"Place: {place}"], ["Signature of the guide", "", guide, d.get("guide_designation") or "{{[Designation]}}",
+                                              f"Department of {dept_full}", college])
 
-    front("ENDORSEMENT BY THE HEAD OF THE DEPARTMENT AND PRINCIPAL")
-    b.para(f"This is to certify that the library dissertation entitled **{title_q}** is a bonafide work done by "
-           f"**{cand}** under the guidance of **{guide}**, {d.get('guide_designation') or '{{[Designation]}}'}, "
-           f"Department of {dept_full}, {college}.", spacing=2.0)
-    b.para("", spacing=2.0, after=40)
-    sign([f"Dr. {d.get('hod_name') or '{{[HOD name]}}'}", "Professor and Head", f"Department of {dept_full}", college, "", "Date:", f"Place: {place}"],
-         [f"Dr. {d.get('principal_name') or '{{[Principal name]}}'}", "Principal", college])
+        front("ENDORSEMENT BY THE HEAD OF THE DEPARTMENT AND PRINCIPAL")
+        b.para(f"This is to certify that the library dissertation entitled **{title_q}** is a bonafide work done by "
+               f"**{cand}** under the guidance of **{guide}**, {d.get('guide_designation') or '{{[Designation]}}'}, "
+               f"Department of {dept_full}, {college}.", spacing=2.0)
+        b.para("", spacing=2.0, after=40)
+        sign([f"Dr. {d.get('hod_name') or '{{[HOD name]}}'}", "Professor and Head", f"Department of {dept_full}", college, "", "Date:", f"Place: {place}"],
+             [f"Dr. {d.get('principal_name') or '{{[Principal name]}}'}", "Principal", college])
 
-    front("COPYRIGHT")
-    b.para("DECLARATION BY THE CANDIDATE", align="center", bold=True, after=18)
-    b.para(f"I hereby declare that {univ} shall have the rights to preserve, use and disseminate this library "
-           f"dissertation in print or electronic format for academic and research purposes.", spacing=2.0)
-    b.para("", spacing=2.0, after=40)
-    sign(["Date:", f"Place: {place}"], ["Signature of the candidate", "", cand])
-    b.para(f"© {univ}", align="center", before=30)
+        front("COPYRIGHT")
+        b.para("DECLARATION BY THE CANDIDATE", align="center", bold=True, after=18)
+        b.para(f"I hereby declare that {univ} shall have the rights to preserve, use and disseminate this library "
+               f"dissertation in print or electronic format for academic and research purposes.", spacing=2.0)
+        b.para("", spacing=2.0, after=40)
+        sign(["Date:", f"Place: {place}"], ["Signature of the candidate", "", cand])
+        b.para(f"© {univ}", align="center", before=30)
 
-    front("ACKNOWLEDGEMENT")
-    b.para("{{[To be written by the candidate]}}", align="center")
+        front("ACKNOWLEDGEMENT")
+        b.para("{{[To be written by the candidate]}}", align="center")
 
-    front("TABLE OF CONTENTS")
-    p = b.para(align="left", spacing=1.5)
-    _field(p, 'TOC \\o "1-2" \\h \\z \\u', "Open this file in Word and press Yes to “update fields” (or right-click here → Update Field) to build the table of contents.", b.font, 11)
-    if model.get("n_tables"):
-        front("LIST OF TABLES")
+        front("TABLE OF CONTENTS")
         p = b.para(align="left", spacing=1.5)
-        _field(p, 'TOC \\h \\z \\c "Table"', "Right-click → Update Field to build the list of tables.", b.font, 11)
-    if model.get("n_figures"):
-        front("LIST OF FIGURES")
-        p = b.para(align="left", spacing=1.5)
-        _field(p, 'TOC \\h \\z \\c "Figure"', "Right-click → Update Field to build the list of figures.", b.font, 11)
-    if model.get("abbreviations"):
-        front("LIST OF ABBREVIATIONS")
-        t = b.doc.add_table(rows=1, cols=2)
-        t.style = "Table Grid"
-        for i, h in enumerate(("Abbreviation", "Expansion")):
-            _shade(t.rows[0].cells[i], "D9E2F3")
-            b.inline(t.rows[0].cells[i].paragraphs[0], h, bold=True)
-        for a, full in model["abbreviations"]:
-            r = t.add_row()
-            b.inline(r.cells[0].paragraphs[0], a, bold=True)
-            b.inline(r.cells[1].paragraphs[0], full)
+        _field(p, 'TOC \\o "1-2" \\h \\z \\u', "Open this file in Word and press Yes to “update fields” (or right-click here → Update Field) to build the table of contents.", b.font, 11)
+        if model.get("n_tables"):
+            front("LIST OF TABLES")
+            p = b.para(align="left", spacing=1.5)
+            _field(p, 'TOC \\h \\z \\c "Table"', "Right-click → Update Field to build the list of tables.", b.font, 11)
+        if model.get("n_figures"):
+            front("LIST OF FIGURES")
+            p = b.para(align="left", spacing=1.5)
+            _field(p, 'TOC \\h \\z \\c "Figure"', "Right-click → Update Field to build the list of figures.", b.font, 11)
+        if model.get("abbreviations"):
+            front("LIST OF ABBREVIATIONS")
+            t = b.doc.add_table(rows=1, cols=2)
+            t.style = "Table Grid"
+            for i, h in enumerate(("Abbreviation", "Expansion")):
+                _shade(t.rows[0].cells[i], "D9E2F3")
+                b.inline(t.rows[0].cells[i].paragraphs[0], h, bold=True)
+            for a, full in model["abbreviations"]:
+                r = t.add_row()
+                b.inline(r.cells[0].paragraphs[0], a, bold=True)
+                b.inline(r.cells[1].paragraphs[0], full)
 
     # Chapters
     first = True

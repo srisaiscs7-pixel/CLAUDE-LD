@@ -2,7 +2,8 @@
 
 Run locally:  streamlit run app.py
 Secrets (Streamlit Cloud → App settings → Secrets, or .streamlit/secrets.toml):
-  GEMINI_API_KEY, APP_PASSWORD, optional GEMINI_MODEL, GITHUB_TOKEN, GITHUB_REPO, NCBI_API_KEY
+  APP_PASSWORD (recommended), optional GITHUB_TOKEN, GITHUB_REPO, NCBI_API_KEY
+The Gemini API key is typed into the sidebar of the app itself.
 """
 from __future__ import annotations
 
@@ -66,61 +67,77 @@ def get_manager():
 
 storage = get_storage()
 manager = get_manager()
-API_KEY = secret("GEMINI_API_KEY")
 NCBI = secret("NCBI_API_KEY")
 
 
+def api_key():
+    """The key typed in the sidebar (kept only for this browser session), or one from Secrets if set."""
+    return (st.session_state.get("gemini_key") or "").strip() or secret("GEMINI_API_KEY")
+
+
 def model_name():
-    return st.session_state.get("model") or secret("GEMINI_MODEL", "gemini-2.5-pro")
+    return st.session_state.get("model") or "gemini-2.5-pro"
 
 
-def llm_factory(model):
+def llm_factory(key, model):
     def make():
         from ld_llm import GeminiLLM
-        return GeminiLLM(API_KEY, model)
+        return GeminiLLM(key, model)
     return make
 
 
 def start(job_id, only=None):
-    if not API_KEY:
-        st.error("GEMINI_API_KEY is missing from the app's Secrets.")
+    key = api_key()
+    if not key:
+        st.error("Enter your Gemini API key in the sidebar first (🔑 Gemini API key).")
         return
-    manager.start(storage, job_id, llm_factory(model_name()), pubmed_key=NCBI,
+    manager.start(storage, job_id, llm_factory(key, model_name()), pubmed_key=NCBI,
                   workers=st.session_state.get("workers", 4), only=only)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def list_models(key):
+    from ld_llm import GeminiLLM
+    return GeminiLLM(key, "x").list_models()
 
 
 # ---------------------------------------------------------------- sidebar
 with st.sidebar:
-    st.header("Settings")
-    st.caption(f"Jobs are saved in {storage.label}.")
-
-    @st.cache_data(ttl=3600, show_spinner=False)
-    def models(key):
+    st.header("🔑 Gemini")
+    st.text_input("Gemini API key", type="password", key="gemini_key",
+                  placeholder="Paste your key (AIza…)",
+                  help="Get it from aistudio.google.com → Get API key. It is kept only in this browser "
+                       "session and is never saved to GitHub or to disk. Enter it again on each new device "
+                       "or after refreshing the page.")
+    key = api_key()
+    opts, err = [], ""
+    if key:
         try:
-            from ld_llm import GeminiLLM
-            return GeminiLLM(key, "x").list_models()
-        except Exception:
-            return []
-    opts = models(API_KEY) if API_KEY else []
-    default = secret("GEMINI_MODEL", "gemini-2.5-pro")
-    if default not in opts:
-        opts = [default] + opts
-    st.selectbox("Gemini model", opts, index=0, key="model",
-                 help="Pro writes better; Flash is faster and cheaper.")
-    st.slider("Parallel writers", 1, 8, 4, key="workers",
-              help="How many sections are written at the same time. Lower it if you see rate-limit errors.")
-    if st.button("Test connections"):
-        with st.spinner("Checking…"):
-            res = src.check_connections()
-            if API_KEY:
-                try:
-                    from ld_llm import GeminiLLM
-                    GeminiLLM(API_KEY, model_name()).generate("Reply with OK", max_tokens=20, temperature=0)
-                    res["Gemini"] = "OK"
-                except Exception as e:
-                    res["Gemini"] = f"Failed: {str(e)[:150]}"
-            else:
-                res["Gemini"] = "No GEMINI_API_KEY in Secrets"
+            opts = list_models(key)
+        except Exception as e:
+            err = str(e)[:200]
+    if err:
+        st.error(f"Key not accepted: {err}")
+    elif key and opts:
+        st.success(f"Key OK – {len(opts)} models available")
+    preferred = ["gemini-2.5-pro", "gemini-2.5-flash"]
+    ordered = [m for m in preferred if m in opts] + [m for m in opts if m not in preferred]
+    if not ordered:
+        ordered = preferred
+    st.selectbox("Model", ordered, index=0, key="model",
+                 help="Pro writes the best dissertations; Flash is faster and cheaper. "
+                      "Newer models appear here automatically.")
+    if st.button("🔌 Test connection", use_container_width=True, disabled=not key):
+        with st.spinner("Checking Gemini and the literature databases…"):
+            res = {}
+            try:
+                from ld_llm import GeminiLLM
+                reply = GeminiLLM(key, model_name()).generate("Reply with the single word OK.",
+                                                             max_tokens=2000, temperature=0)
+                res[f"Gemini ({model_name()})"] = "OK" if reply else "Empty reply"
+            except Exception as e:
+                res[f"Gemini ({model_name()})"] = f"Failed: {str(e)[:200]}"
+            res.update(src.check_connections(NCBI))
             if isinstance(storage, GitHubStorage):
                 try:
                     res["GitHub storage"] = storage.check()
@@ -128,6 +145,10 @@ with st.sidebar:
                     res["GitHub storage"] = f"Failed: {e}"
         for k, v in res.items():
             (st.success if str(v).startswith("OK") else st.error)(f"{k}: {v}")
+    st.divider()
+    st.slider("Parallel writers", 1, 8, 4, key="workers",
+              help="How many sections are written at the same time. Lower it if you see rate-limit errors.")
+    st.caption(f"Dissertations are saved in {storage.label}.")
 
 st.title("🦷 MDS Library Dissertation Builder")
 tab_new, tab_jobs = st.tabs(["➕ New dissertation", "📚 My dissertations"])
@@ -136,11 +157,20 @@ tab_new, tab_jobs = st.tabs(["➕ New dissertation", "📚 My dissertations"])
 with tab_new:
     c1, c2 = st.columns([3, 2])
     with c1:
-        topic = st.text_input("Dissertation topic / title *",
+        topic = st.text_input("Topic / title (optional if your file or text has it)",
                               placeholder="e.g. Lasers in gingival depigmentation – a review")
         dept = st.selectbox("Department *", list(config.DEPARTMENTS))
-        syn = st.file_uploader("Synopsis (PDF, Word or text) – optional but recommended",
-                               type=["pdf", "docx", "txt", "md"])
+        syn_mode = st.radio("Synopsis (optional but recommended)", ["📎 Upload file", "📝 Paste text"],
+                            horizontal=True)
+        syn, syn_text = None, ""
+        if syn_mode == "📎 Upload file":
+            syn = st.file_uploader("Synopsis file (PDF, Word or text)", type=["pdf", "docx", "txt", "md"])
+        else:
+            syn_text = st.text_area("Paste the synopsis here", height=260,
+                                    placeholder="Title, introduction, aim, objectives, need for the study, "
+                                                "methodology, references … paste everything you have.")
+            if syn_text.strip():
+                st.caption(f"{len(syn_text.split()):,} words pasted")
         pages = st.slider("Number of pages (main text, excluding front pages)", 1, 150, 60)
         wpp_preview = None
     with c2:
@@ -161,11 +191,16 @@ with tab_new:
                                             index=0 if p["page_number_pos"] == "center" else 1, horizontal=True)
         n_tables = st.slider("Tables", 2, 4, 3)
         n_figs = st.slider("Flowcharts", 1, 2, 1)
-        include_review = st.checkbox("Include a 'Review of Literature' chapter", True)
+        st.markdown("**What to include**")
+        front_matter = st.checkbox("Front pages (title page, declaration, certificates, contents lists)", False)
+        include_aims = st.checkbox("Aims and Objectives chapter", False)
+        include_review = st.checkbox("Review of Literature chapter", True,
+                                     help="Ignored if your file lists its own headings.")
+        st.caption("If your file or pasted text has a contents list / headings, the chapters follow it exactly.")
         review_outline = st.checkbox("Let me check the chapter plan before writing", True)
     wpp = config.words_per_page(p["line_spacing"], p["size"])
     st.caption(f"About {pages * wpp:,} words and roughly {config.reference_target(pages)} references.")
-    with st.expander("Front-page details (optional – read from the synopsis if left blank)"):
+    with st.expander("Front-page details (only used when front pages are ticked)"):
         d1, d2 = st.columns(2)
         det = {
             "candidate_name": d1.text_input("Candidate name (without Dr.)"),
@@ -178,11 +213,13 @@ with tab_new:
             "academic_year": d2.text_input("Academic year", placeholder="2024–2027"),
             "place": d2.text_input("Place"),
         }
-    if st.button("🚀 Generate dissertation", type="primary", disabled=not topic.strip()):
+    if st.button("🚀 Generate dissertation", type="primary", disabled=not (topic.strip() or syn or syn_text.strip())):
         jid = jobs.create_job(storage, topic=topic, department=dept, pages=pages, settings=p,
-                              synopsis_name=syn.name if syn else None, synopsis_bytes=syn.getvalue() if syn else None,
+                              synopsis_name=syn.name if syn else ("pasted_synopsis.txt" if syn_text.strip() else None),
+                              synopsis_bytes=syn.getvalue() if syn else (syn_text.encode("utf-8") if syn_text.strip() else None),
                               n_tables=n_tables, n_figures=n_figs, include_review=include_review,
-                              review_outline=review_outline, details=det)
+                              review_outline=review_outline, details=det,
+                              front_matter=front_matter, include_aims=include_aims)
         start(jid)
         st.session_state.open_job = jid
         st.success("Started. Follow it in **My dissertations** – you can close this page and come back later "

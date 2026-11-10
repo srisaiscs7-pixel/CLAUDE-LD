@@ -40,10 +40,19 @@ Department: {department}
 Aim: {aim}
 Objectives: {objectives}
 Scope / notes from synopsis: {scope}
+Uploaded text (may contain the headings or table of contents the user wants):
+<<<
+{source_text}
+>>>
 Target length of the main text: about {pages} pages ({words} words of prose in total).
 
 Rules:
-- Order: "Introduction" (kind "intro"), "Aims and Objectives" (kind "aims"), then 3-{max_topic} topic
+- If the uploaded text contains a table of contents, chapter list or list of headings, FOLLOW IT: use those
+  headings as the chapters and sections, in the same order and with the same wording (fix only spelling),
+  and give each one the closest kind below. Do not add chapters the user did not list, except that you may
+  add sections inside a chapter. Otherwise build the outline yourself using the order below.
+- {aims_rule}
+- Default order: "Introduction" (kind "intro"), then 3-{max_topic} topic
   chapters that cover the subject logically (for example historical background, classification, aetiology,
   materials, techniques, clinical applications, complications, recent advances; choose what fits the
   topic) with kind "narrative", then optionally one "Review of Literature" chapter (kind "review"), then

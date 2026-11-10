@@ -190,11 +190,17 @@ def stage_plan(ctx):
         objectives="; ".join(d.get("objectives") or []), scope=(d.get("scope", "") + " " + d.get("methodology", ""))[:3000],
         pages=pages, words=pages * config.words_per_page(j["settings"]["line_spacing"], j["settings"]["size"]),
         max_topic=max_topic, max_sections=max_sections,
+        aims_rule=("Include an \"Aims and Objectives\" chapter (kind \"aims\") right after the Introduction."
+                   if j.get("include_aims", True) else
+                   "Do NOT include an Aims and Objectives chapter and do not use kind \"aims\"."),
+        source_text=" ".join(ctx.st.read_json(ctx.id, "synopsis.json", {}).get("text", "").split()[:5000]) or "(none)",
         review_rule=("Include the Review of Literature chapter." if j.get("include_review", True)
                      else "Do NOT include a Review of Literature chapter."),
         n_landmarks=10 if pages >= 40 else 5, n_tables=j.get("n_tables", 3), n_figs=j.get("n_figures", 1)),
         task="plan", json_mode=True, temperature=0.4, max_tokens=12000)
     chapters = plan.get("chapters") or []
+    if not j.get("include_aims", True):
+        chapters = [c for c in chapters if (c.get("kind") or "").lower() != "aims"]
     for i, c in enumerate(chapters):
         c["key"] = f"c{i + 1}"
         c["kind"] = (c.get("kind") or "narrative").lower()
@@ -667,7 +673,7 @@ def stage_assemble(ctx):
     d = dict(j["details"])
     d["department_full"] = j["department"]
     d["university"] = d.get("university") or j["settings"].get("university", "")
-    model = {"settings": j["settings"], "details": d, "chapters": chapters, "references": refs,
+    model = {"front_matter": j.get("front_matter", True), "settings": j["settings"], "details": d, "chapters": chapters, "references": refs,
              "abbreviations": abbreviations(CITE.sub("", all_text)) if j.get("abbreviations", True) else [],
              "n_tables": sum(v["kind"] == "table" for v in visuals), "n_figures": sum(v["kind"] == "flowchart" for v in visuals)}
     ctx.progress("assemble", 0.6, "Saving the Word file")
@@ -693,9 +699,10 @@ def stage_assemble(ctx):
     if qa_names:
         lines += ["", "Author names in the text that do not match a citation in the same paragraph (check these):"]
         lines += [f"  {x}" for x in sorted(set(qa_names))[:40]]
-    lines += ["", "Still to fill in Word (shown in red): candidate, guide, HOD and principal names if missing, "
-                  "acknowledgement, place and dates.",
-              "On opening in Word, choose Yes to update fields so the contents, list of tables and list of figures fill in."]
+    if j.get("front_matter", True):
+        lines += ["", "Still to fill in Word (shown in red): candidate, guide, HOD and principal names if missing, "
+                      "acknowledgement, place and dates.",
+                  "On opening in Word, choose Yes to update fields so the contents, list of tables and list of figures fill in."]
     j["qa"] = "\n".join(lines)
     ctx.st.write_bytes(ctx.id, "quality_report.txt", j["qa"].encode("utf-8"))
     ctx.mark("assemble")

@@ -47,7 +47,8 @@ class JobManager:
 
 
 def create_job(storage, *, topic, department, pages, settings, synopsis_name=None, synopsis_bytes=None,
-               n_tables=3, n_figures=1, include_review=True, review_outline=False, details=None):
+               n_tables=3, n_figures=1, include_review=True, review_outline=False, details=None,
+               front_matter=False, include_aims=False):
     job_id = datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
     text, pdf_b64 = "", ""
     if synopsis_bytes:
@@ -61,6 +62,7 @@ def create_job(storage, *, topic, department, pages, settings, synopsis_name=Non
         "id": job_id, "topic": topic.strip(), "department": department, "pages": int(pages),
         "settings": st, "n_tables": int(n_tables), "n_figures": int(n_figures),
         "include_review": include_review, "review_outline": review_outline,
+        "front_matter": front_matter, "include_aims": include_aims,
         "details": {k: v for k, v in (details or {}).items() if v},
         "status": "queued", "stage": "analyse", "progress": 0.0, "stages_done": [],
         "created": datetime.now().isoformat(timespec="seconds"), "log": [],
